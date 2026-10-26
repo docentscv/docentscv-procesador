@@ -32,8 +32,16 @@ def lab(v, tabla):
 class Fallo(Exception): pass
 
 # ---------- psql ----------
+def limpiar(nombre):
+    """Lee una variable de entorno quitando espacios, comillas y una posible etiqueta 'NOMBRE=' pegada por error."""
+    v = os.environ.get(nombre, '').strip().strip('"\'').strip()
+    v = re.sub(r'^' + nombre + r'\s*[=:]?\s*', '', v).strip()
+    return v
 def psql(sql, cwd=None, tuples=False):
-    cmd = ['psql', os.environ['DATABASE_URL'], '-v', 'ON_ERROR_STOP=1', '-q'] + (['-At', '-F', '\t'] if tuples else [])
+    url = limpiar('DATABASE_URL')
+    if not url.startswith('postgres'):
+        raise Fallo(f'DATABASE_URL no es válida: tiene {len(url)} caracteres y empieza por «{url[:12]}». Debe empezar por postgresql://')
+    cmd = ['psql', url, '-v', 'ON_ERROR_STOP=1', '-q'] + (['-At', '-F', '\t'] if tuples else [])
     p = subprocess.run(cmd, input=sql, capture_output=True, text=True, cwd=cwd)
     if p.returncode: ls = p.stderr.strip().splitlines(); e = next((l for l in ls if 'ERROR:' in l), ls[-1] if ls else 'error de base de datos'); raise Fallo(e.split('ERROR:')[-1].strip())
     return p.stdout
@@ -167,8 +175,8 @@ def descargar(archivo, destino):
     if os.environ.get('STORAGE_LOCAL_DIR'):            # solo para pruebas en local
         try: return shutil.copyfile(os.path.join(os.environ['STORAGE_LOCAL_DIR'], archivo), destino)
         except OSError as e: raise Fallo('Archivo no encontrado: ' + str(e))
-    url = os.environ['SUPABASE_URL'].rstrip('/') + '/storage/v1/object/pdfs/' + urllib.parse.quote(archivo)
-    key = os.environ['SUPABASE_SERVICE_KEY']
+    url = limpiar('SUPABASE_URL').rstrip('/') + '/storage/v1/object/pdfs/' + urllib.parse.quote(archivo)
+    key = limpiar('SUPABASE_SERVICE_KEY')
     req = urllib.request.Request(url, headers={'apikey': key, 'Authorization': 'Bearer ' + key})
     try:
         with urllib.request.urlopen(req, timeout=120) as r, open(destino, 'wb') as f: shutil.copyfileobj(r, f)
