@@ -1,0 +1,23 @@
+name: Procesar PDF pendientes
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+concurrency:
+  group: procesar
+  cancel-in-progress: false
+jobs:
+  procesar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar herramientas
+        run: |
+          command -v pdftotext >/dev/null && command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils postgresql-client; }
+      - name: Procesar PDF pendientes
+        run: python3 procesar_pdfs.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
