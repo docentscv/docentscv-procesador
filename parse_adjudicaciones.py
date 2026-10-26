@@ -22,9 +22,9 @@ def parse(pdf):
         r = {'pos': pos, 'nombre': nombre_de(body), 'st': s[-1] if s else None}
         m = REC.search(body)
         if m:
-            h = re.search(r'(\d+) horas|Jornada completa', body)
+            h = re.search(r'(\d+(?:,\d+)?) horas|Jornada completa', body)
             r.update(code=m[1], loc=m[2].strip(), cen=m[3], nom=m[4].strip(), esp=m[5], espn=m[6].strip(), tipo=m[8].strip(),
-                     h=(h[1] or 'completa') if h else '', prov=PROV.get(m[3][:2], '?'))
+                     h=(h[1].replace(',', '.') if h[1] else 'completa') if h else '', prov=PROV.get(m[3][:2], '?'))
         out.append(r)
     return out
 

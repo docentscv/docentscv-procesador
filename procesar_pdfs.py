@@ -93,7 +93,7 @@ do $$ begin
   if exists (select 1 from instantaneas where fecha = {fecha} and tipo = 'continua' and grupo = {grupo}) then
     raise exception 'Esa lista (%) ya estaba cargada', {fecha}; end if; end $$;
 create temp table t_raw (cuerpo text, bolsa text, bolsa_n text, pos int, sub int, nn text, nombre text, estado smallint) on commit drop;
-create temp table t_adj (cuerpo text, bolsa text, pos int, plaza text, centro text, esp text, tipo text, detalle text, horas smallint) on commit drop;
+create temp table t_adj (cuerpo text, bolsa text, pos int, plaza text, centro text, esp text, tipo text, detalle text, horas numeric(6,3)) on commit drop;
 create temp table t_res (cuerpo text, bolsa text, a int, b int, c int, d int, e int) on commit drop;
 create temp table t_alc (cuerpo text, bolsa text, esp text, n int, x_max int, p_max int) on commit drop;
 create temp table t_cen (codigo text, nombre text, localidad text, provincia text) on commit drop;

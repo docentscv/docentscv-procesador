@@ -32,8 +32,8 @@ def parse(pdf):
             r = {'nombre': nombre_de(rest), 'cuerpo': cuerpo, 'bolsa': bolsa, 'bolsa_n': bolsa_n.strip(), 'pos': pos, 'sub': int(sub) if sub else None, 'st': s[-1] if s else None}
             m = REC.search(rest)
             if m:
-                h = re.search(r'(\d+) horas|Jornada completa', rest)
+                h = re.search(r'(\d+(?:,\d+)?) horas|Jornada completa', rest)
                 r.update(code=m[1], loc=m[2].strip(), cen=m[3], nom=m[4].strip(), esp=m[5], espn=m[6].strip(),
-                         tipo=m[8].strip(), h=(h[1] or '') if h else '', prov=PROV.get(m[3][:2], '?'))
+                         tipo=m[8].strip(), h=(h[1].replace(',', '.') if h[1] else '') if h else '', prov=PROV.get(m[3][:2], '?'))
             out.append(r)
     return out
