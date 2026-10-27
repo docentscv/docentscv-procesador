@@ -13,7 +13,7 @@ Opciones:  --local RUTA.pdf --tipo continua|ofertas --cuerpo maestros|otros|todo
 """
 import os, re, sys, csv, subprocess, tempfile, urllib.request, urllib.parse, collections, argparse, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import parse_adjudicaciones as pm, parse_otros_cuerpos as po, parse_ofertas as pf, avisos
+import parse_adjudicaciones as pm, parse_otros_cuerpos as po, parse_ofertas as pf, parse_dificil as pd, avisos
 
 SLUG = {"PROFESSORS D'ENSENYAMENT SECUNDARI": "secundaria", "PROFESSORS DE MÚSICA I ARTS ESCÈNIQUES": "musica",
         "CATEDRÀTICS DE MÚSICA I ARTS ESCÈNIQUES": "catedraticos_musica", "PROFESSORS D'ARTS PLÀSTIQUES I DISSENY": "artes_plasticas",
@@ -216,7 +216,29 @@ commit;
 """, cwd=d)
     return len(regs)
 
+def procesar_dificil(nombre, ruta, d):
+    m = re.match(r'^(\d{2})(\d{2})(\d{2})_pue_(prov|def)\.pdf$', nombre.strip(), re.I)
+    if not m: raise Fallo('El nombre del archivo debe ser como lo publica la Conselleria: AAMMDD_pue_def.pdf (por ejemplo 261023_pue_def.pdf).')
+    try: fecha, regs = pd.leer_dificil(ruta)
+    except pd.ErrorPDF as e: raise Fallo(str(e))
+    if fecha != f'20{m.group(1)}-{m.group(2)}-{m.group(3)}': raise Fallo(f'La fecha del nombre del archivo no coincide con la del PDF ({fecha}).')
+    with open(os.path.join(d, 'df.csv'), 'w', newline='', encoding='utf8') as f:
+        w = csv.writer(f)
+        for r in regs:
+            w.writerow([fecha, r['cuerpo'], r['especialidad_codigo'], r['provincia'], r['localidad'], r['centro_codigo'], r['centro'], r['codigo_plaza'],
+                        r['tipo'], r['detalle'], r['horas'], r['req_ling'], 't' if r['iti'] else 'f', r['observ']])
+    psql(f"""begin;
+delete from plazas_dificil where fecha = {lit(fecha)};
+\\copy plazas_dificil from 'df.csv' csv
+insert into centros (codigo, nombre, localidad, provincia)
+  select distinct on (centro_codigo) centro_codigo, centro, localidad, provincia from plazas_dificil p
+  where p.fecha = {lit(fecha)} and not exists (select 1 from centros c where c.codigo = p.centro_codigo);
+commit;
+""", cwd=d)
+    return len(regs)
+
 def procesar(nombre, tipo, cuerpo, ruta_pdf, d):
+    if tipo == 'dificil': return procesar_dificil(nombre, ruta_pdf, d)
     if tipo == 'ofertas': return procesar_ofertas(nombre, ruta_pdf, d)
     if tipo != 'continua': raise Fallo('Las listas de inicio de curso todavía se cargan a mano; este procesador solo hace adjudicaciones continuas.')
     fecha = interpretar_nombre(nombre, cuerpo)
