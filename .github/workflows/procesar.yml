@@ -1,8 +1,8 @@
 name: Procesar PDF pendientes
 on:
   schedule:
-    - cron: '*/15 * * * *'
-  workflow_dispatch:
+    - cron: '*/15 * * * *'      # cada 15 minutos (GitHub puede retrasarlo unos minutos)
+  workflow_dispatch:            # también se puede lanzar a mano desde la pestaña Actions
 concurrency:
   group: procesar
   cancel-in-progress: false
@@ -21,3 +21,4 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
