@@ -9,11 +9,11 @@ Variables de entorno:
   DATABASE_URL          cadena de conexión de Supabase (Session pooler)
   SUPABASE_URL          https://xxxx.supabase.co
   SUPABASE_SERVICE_KEY  clave secreta (sb_secret_...)   -> para descargar el PDF
-Opciones:  --local RUTA.pdf --tipo continua --cuerpo maestros|otros   (prueba sin Storage: carga ese PDF y ya)
+Opciones:  --local RUTA.pdf --tipo continua|ofertas --cuerpo maestros|otros|todos   (prueba sin Storage: carga ese PDF y ya)
 """
 import os, re, sys, csv, subprocess, tempfile, urllib.request, urllib.parse, collections, argparse, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import parse_adjudicaciones as pm, parse_otros_cuerpos as po
+import parse_adjudicaciones as pm, parse_otros_cuerpos as po, parse_ofertas as pf
 
 SLUG = {"PROFESSORS D'ENSENYAMENT SECUNDARI": "secundaria", "PROFESSORS DE MÚSICA I ARTS ESCÈNIQUES": "musica",
         "CATEDRÀTICS DE MÚSICA I ARTS ESCÈNIQUES": "catedraticos_musica", "PROFESSORS D'ARTS PLÀSTIQUES I DISSENY": "artes_plasticas",
@@ -188,7 +188,36 @@ def interpretar_nombre(nombre, cuerpo):
     if (m.group(4).lower() == 'mae') != (cuerpo == 'maestros'): raise Fallo('El nombre del archivo no coincide con el cuerpo elegido al subirlo (maestros / otros).')
     return f'20{m.group(1)}-{m.group(2)}-{m.group(3)}'
 
+# ---------- plazas ofertadas (PDF AAMMDD_pue_prov.pdf / AAMMDD_pue_def.pdf) ----------
+def procesar_ofertas(nombre, ruta, d):
+    m = re.match(r'^(\d{2})(\d{2})(\d{2})_pue_(prov|def)\.pdf$', nombre.strip(), re.I)
+    if not m: raise Fallo('El nombre del archivo debe ser como lo publica la Conselleria: AAMMDD_pue_prov.pdf o AAMMDD_pue_def.pdf (por ejemplo 261027_pue_prov.pdf).')
+    version = m.group(4).lower()
+    try: fecha, regs = pf.leer_ofertas(ruta)
+    except pf.ErrorPDF as e: raise Fallo(str(e))
+    if fecha != f'20{m.group(1)}-{m.group(2)}-{m.group(3)}': raise Fallo(f'La fecha del nombre del archivo no coincide con la del PDF ({fecha}).')
+    ya = psql(f"select coalesce(max(version), '') from plazas_ofertadas where fecha = {lit(fecha)}", tuples=True).strip()
+    if ya == 'def' and version == 'prov': raise Fallo('Ya está cargada la versión definitiva de ese día; no se sustituye por la provisional.')
+    prov = {'Alacant': 'Alicante'}
+    with open(os.path.join(d, 'of.csv'), 'w', newline='', encoding='utf8') as f:
+        w = csv.writer(f)
+        for r in regs:
+            w.writerow([fecha, version, r['cuerpo'], r['especialidad_codigo'], prov.get(r['provincia'], r['provincia']), r['localidad'], r['centro_codigo'], r['centro'],
+                        r['codigo_plaza'], r['tipo'], r['detalle'], '' if r['horas'] is None else r['horas'], r['req_ling'], 't' if r['iti'] else 'f', r['observ']])
+    psql(f"""begin;
+delete from plazas_ofertadas where fecha = {lit(fecha)};
+create temp table _of (like plazas_ofertadas) on commit drop;
+\\copy _of from 'of.csv' csv
+insert into plazas_ofertadas select * from _of;
+insert into centros (codigo, nombre, localidad, provincia)
+  select distinct on (centro_codigo) centro_codigo, centro, localidad, provincia from _of
+  where not exists (select 1 from centros c where c.codigo = _of.centro_codigo);
+commit;
+""", cwd=d)
+    return len(regs)
+
 def procesar(nombre, tipo, cuerpo, ruta_pdf, d):
+    if tipo == 'ofertas': return procesar_ofertas(nombre, ruta_pdf, d)
     if tipo != 'continua': raise Fallo('Las listas de inicio de curso todavía se cargan a mano; este procesador solo hace adjudicaciones continuas.')
     fecha = interpretar_nombre(nombre, cuerpo)
     recs = leer_pdf(ruta_pdf, cuerpo)
@@ -211,10 +240,10 @@ def main():
                 psql(f"update importaciones set estado = 'procesando' where id = {int(iid)} and estado = 'pendiente'")
                 d = os.path.join(tmp, 'w' + iid); os.makedirs(d); pdf = os.path.join(d, 'in.pdf')
                 try:
-                    interpretar_nombre(nombre, cuerpo) if tipo == 'continua' else None
+                    interpretar_nombre(nombre, cuerpo) if tipo == 'continua' else None   # (las ofertas se validan al procesar)
                     descargar(archivo, pdf); n = procesar(nombre, tipo, cuerpo, pdf, d)
                     psql(f"update importaciones set estado = 'ok', filas = {n}, mensaje = null, procesado = now() where id = {int(iid)}")
-                    print('OK', nombre, n); hecho_otros |= cuerpo == 'otros'
+                    print('OK', nombre, n); hecho_otros |= cuerpo == 'otros' and tipo == 'continua'
                 except Fallo as e:
                     psql(f"update importaciones set estado = 'error', mensaje = {lit(str(e)[:500])}, procesado = now() where id = {int(iid)}"); print('ERROR', nombre, e)
                 except Exception as e:
