@@ -259,6 +259,10 @@ def main():
             print(len(pend), 'pendiente(s)')
             for l in pend:
                 iid, archivo, nombre, tipo, cuerpo = l.split('\t')
+                mc = re.search(r'_lis_(mae|sec)\.pdf$', nombre.strip(), re.I)
+                if tipo == 'continua' and mc:     # el cuerpo lo marca el nombre del archivo, da igual lo que se eligiera al subirlo
+                    cuerpo = 'maestros' if mc.group(1).lower() == 'mae' else 'otros'
+                    psql(f"update importaciones set cuerpo = {lit(cuerpo)} where id = {int(iid)}")
                 psql(f"update importaciones set estado = 'procesando' where id = {int(iid)} and estado = 'pendiente'")
                 d = os.path.join(tmp, 'w' + iid); os.makedirs(d); pdf = os.path.join(d, 'in.pdf')
                 try:
