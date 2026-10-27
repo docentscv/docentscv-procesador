@@ -13,7 +13,7 @@ Opciones:  --local RUTA.pdf --tipo continua|ofertas --cuerpo maestros|otros|todo
 """
 import os, re, sys, csv, subprocess, tempfile, urllib.request, urllib.parse, collections, argparse, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import parse_adjudicaciones as pm, parse_otros_cuerpos as po, parse_ofertas as pf
+import parse_adjudicaciones as pm, parse_otros_cuerpos as po, parse_ofertas as pf, avisos
 
 SLUG = {"PROFESSORS D'ENSENYAMENT SECUNDARI": "secundaria", "PROFESSORS DE MÚSICA I ARTS ESCÈNIQUES": "musica",
         "CATEDRÀTICS DE MÚSICA I ARTS ESCÈNIQUES": "catedraticos_musica", "PROFESSORS D'ARTS PLÀSTIQUES I DISSENY": "artes_plasticas",
@@ -227,7 +227,7 @@ def procesar(nombre, tipo, cuerpo, ruta_pdf, d):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--local'); ap.add_argument('--tipo', default='continua'); ap.add_argument('--cuerpo')
     ap.add_argument('--sin-tasas', action='store_true'); a = ap.parse_args()
-    hecho_otros = False
+    hecho_otros = False; fechas_ofertas = []
     with tempfile.TemporaryDirectory() as tmp:
         if a.local:
             d = os.path.join(tmp, 'w'); os.makedirs(d)
@@ -243,11 +243,15 @@ def main():
                     interpretar_nombre(nombre, cuerpo) if tipo == 'continua' else None   # (las ofertas se validan al procesar)
                     descargar(archivo, pdf); n = procesar(nombre, tipo, cuerpo, pdf, d)
                     psql(f"update importaciones set estado = 'ok', filas = {n}, mensaje = null, procesado = now() where id = {int(iid)}")
+                    if tipo == 'ofertas': fechas_ofertas.append(psql('select max(fecha) from plazas_ofertadas', tuples=True).strip())
                     print('OK', nombre, n); hecho_otros |= cuerpo == 'otros' and tipo == 'continua'
                 except Fallo as e:
                     psql(f"update importaciones set estado = 'error', mensaje = {lit(str(e)[:500])}, procesado = now() where id = {int(iid)}"); print('ERROR', nombre, e)
                 except Exception as e:
                     psql(f"update importaciones set estado = 'error', mensaje = {lit('Error inesperado: ' + str(e)[:400])}, procesado = now() where id = {int(iid)}"); print('ERROR', nombre, repr(e))
+        for f in sorted(set(fechas_ofertas)):
+            try: avisos.avisar_ofertas(psql, lit, f)
+            except Exception as e: print('avisos: error', repr(e)[:300])
         if hecho_otros and not a.sin_tasas:
             d = os.path.join(tmp, 'tasas'); os.makedirs(d); print('tasas:', recalcular_tasas(d))
 if __name__ == '__main__': main()
