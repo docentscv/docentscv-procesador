@@ -13,7 +13,7 @@ Opciones:  --local RUTA.pdf --tipo continua|ofertas --cuerpo maestros|otros|todo
 """
 import os, re, sys, csv, subprocess, tempfile, urllib.request, urllib.parse, collections, argparse, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import parse_adjudicaciones as pm, parse_otros_cuerpos as po, parse_ofertas as pf, parse_dificil as pd, avisos
+import parse_adjudicaciones as pm, parse_otros_cuerpos as po, parse_ofertas as pf, parse_dificil as pd, parse_adj_dificil as pad, avisos
 
 SLUG = {"PROFESSORS D'ENSENYAMENT SECUNDARI": "secundaria", "PROFESSORS DE MÚSICA I ARTS ESCÈNIQUES": "musica",
         "CATEDRÀTICS DE MÚSICA I ARTS ESCÈNIQUES": "catedraticos_musica", "PROFESSORS D'ARTS PLÀSTIQUES I DISSENY": "artes_plasticas",
@@ -237,7 +237,29 @@ commit;
 """, cwd=d)
     return len(regs)
 
+def procesar_dificil_adj(nombre, ruta, d):
+    m = re.match(r'^(\d{2})(\d{2})(\d{2})_par\.pdf$', nombre.strip(), re.I)
+    if not m: raise Fallo('El nombre del archivo debe ser como lo publica la Conselleria: AAMMDD_par.pdf (por ejemplo 261023_par.pdf).')
+    try: fecha, regs, _vacias = pad.leer_adj_dificil(ruta)
+    except pad.ErrorPDF as e: raise Fallo(str(e))
+    if fecha != f'20{m.group(1)}-{m.group(2)}-{m.group(3)}': raise Fallo(f'La fecha del nombre del archivo no coincide con la del PDF ({fecha}).')
+    with open(os.path.join(d, 'da.csv'), 'w', newline='', encoding='utf8') as f:
+        w = csv.writer(f)
+        for r in regs:
+            w.writerow([fecha, r['cuerpo'], r['especialidad_codigo'], r['codigo_plaza'], r['centro_codigo'], r['centro'], r['nombre'], norm(r['nombre']), r['peticion'], r['grupo'], 't' if r['grupo'] != 3 else 'f'])
+    psql(f"""begin;
+create temp table da_tmp (fecha date, cuerpo text, especialidad_codigo text, codigo_plaza text, centro_codigo text, centro text, nombre text, nombre_norm text, peticion integer, grupo integer, en_bolsa boolean) on commit drop;
+\\copy da_tmp from 'da.csv' csv
+delete from adjudicaciones_dificil where fecha = {lit(fecha)};
+insert into adjudicaciones_dificil (fecha, cuerpo, especialidad_codigo, codigo_plaza, centro_codigo, centro, nombre, nombre_norm, persona_id, peticion, grupo, en_bolsa)
+  select t.fecha, t.cuerpo, t.especialidad_codigo, t.codigo_plaza, t.centro_codigo, t.centro, t.nombre, t.nombre_norm,
+         (select min(p.id) from personas p where p.nombre_norm = t.nombre_norm), t.peticion, t.grupo, t.en_bolsa from da_tmp t;
+commit;
+""", cwd=d)
+    return len(regs)
+
 def procesar(nombre, tipo, cuerpo, ruta_pdf, d):
+    if tipo == 'dificil_adj': return procesar_dificil_adj(nombre, ruta_pdf, d)
     if tipo == 'dificil': return procesar_dificil(nombre, ruta_pdf, d)
     if tipo == 'ofertas': return procesar_ofertas(nombre, ruta_pdf, d)
     if tipo != 'continua': raise Fallo('Las listas de inicio de curso todavía se cargan a mano; este procesador solo hace adjudicaciones continuas.')

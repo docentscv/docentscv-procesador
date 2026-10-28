@@ -17,9 +17,9 @@ PAGINAS = [
     ('https://ceice.gva.es/es/web/rrhh-educacion/convocatoria-y-peticion-telematica',  {'pue': 'ofertas'}),
     ('https://ceice.gva.es/es/web/rrhh-educacion/resolucion',                           {'lis': 'continua', 'pue': 'ofertas'}),
     ('https://ceice.gva.es/es/web/rrhh-educacion/convocatoria-y-peticion-telematica6', {'pue': 'dificil'}),
-    ('https://ceice.gva.es/es/web/rrhh-educacion/resolucion1',                          {'pue': 'dificil'}),
+    ('https://ceice.gva.es/es/web/rrhh-educacion/resolucion1',                          {'pue': 'dificil', 'par': 'dificil_adj'}),
 ]
-NOM = re.compile(r'^(\d{2})(\d{2})(\d{2})_(lis_mae|lis_sec|pue_prov|pue_def)\.pdf$', re.I)
+NOM = re.compile(r'^(\d{2})(\d{2})(\d{2})_(lis_mae|lis_sec|pue_prov|pue_def|par)\.pdf$', re.I)
 
 
 def toca_ahora(ahora=None):
