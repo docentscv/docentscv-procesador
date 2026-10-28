@@ -45,6 +45,7 @@ def candidatos(hoy=None):
             if f < lim or f > hoy + datetime.timedelta(days=2): continue
             clase = m.group(4).lower().split('_')[0]          # 'lis' o 'pue'
             tipo = reglas.get(clase)
+            if tipo == 'dificil' and m.group(4).lower() == 'pue_prov': continue    # el provisional de difícil cobertura lleva la fecha del día anterior dentro del PDF; solo cargamos el definitivo
             if not tipo or (n, tipo) in vistos: continue
             vistos.add((n, tipo))
             cuerpo = ('maestros' if n.lower().endswith('_lis_mae.pdf') else 'otros') if tipo == 'continua' else 'todos'
