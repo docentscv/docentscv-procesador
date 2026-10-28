@@ -15,6 +15,8 @@ jobs:
       - name: Instalar herramientas
         run: |
           command -v pdftotext >/dev/null && command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils postgresql-client; }
+      - name: Instalar librería de notificaciones
+        run: pip install --quiet --break-system-packages pywebpush || pip install --quiet pywebpush
       - name: Procesar PDF pendientes
         run: python3 procesar_pdfs.py
         env:
