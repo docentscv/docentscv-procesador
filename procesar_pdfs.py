@@ -271,7 +271,7 @@ def procesar(nombre, tipo, cuerpo, ruta_pdf, d):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--local'); ap.add_argument('--tipo', default='continua'); ap.add_argument('--cuerpo')
     ap.add_argument('--sin-tasas', action='store_true'); a = ap.parse_args()
-    hecho_otros = False; fechas_ofertas = []
+    hecho_otros = False; fechas_ofertas = []; resultados = []
     try: avisos.asegurar_vapid(psql, lit)
     except Exception as e: print('push: no se pudieron crear las claves:', repr(e)[:200])
     with tempfile.TemporaryDirectory() as tmp:
@@ -294,16 +294,19 @@ def main():
                     descargar(archivo, pdf); n = procesar(nombre, tipo, cuerpo, pdf, d)
                     psql(f"update importaciones set estado = 'ok', filas = {n}, mensaje = null, procesado = now() where id = {int(iid)}")
                     if tipo == 'ofertas': fechas_ofertas.append(psql('select max(fecha) from plazas_ofertadas', tuples=True).strip())
+                    resultados.append((nombre, True, f'{n} filas'))
                     print('OK', nombre, n); hecho_otros |= cuerpo == 'otros' and tipo == 'continua'
                 except Fallo as e:
-                    psql(f"update importaciones set estado = 'error', mensaje = {lit(str(e)[:500])}, procesado = now() where id = {int(iid)}"); print('ERROR', nombre, e)
+                    psql(f"update importaciones set estado = 'error', mensaje = {lit(str(e)[:500])}, procesado = now() where id = {int(iid)}"); print('ERROR', nombre, e); resultados.append((nombre, False, str(e)[:90]))
                 except Exception as e:
-                    psql(f"update importaciones set estado = 'error', mensaje = {lit('Error inesperado: ' + str(e)[:400])}, procesado = now() where id = {int(iid)}"); print('ERROR', nombre, repr(e))
+                    psql(f"update importaciones set estado = 'error', mensaje = {lit('Error inesperado: ' + str(e)[:400])}, procesado = now() where id = {int(iid)}"); print('ERROR', nombre, repr(e)); resultados.append((nombre, False, 'error inesperado'))
         for f in sorted(set(fechas_ofertas)):
             try: avisos.avisar_ofertas(psql, lit, f)
             except Exception as e: print('avisos: error', repr(e)[:300])
             try: avisos.avisar_push(psql, lit, f)
             except Exception as e: print('push: error', repr(e)[:300])
+        try: avisos.avisar_admin(psql, lit, resultados)
+        except Exception as e: print('push admin: error', repr(e)[:300])
         if hecho_otros and not a.sin_tasas:
             d = os.path.join(tmp, 'tasas'); os.makedirs(d); print('tasas:', recalcular_tasas(d))
 if __name__ == '__main__': main()

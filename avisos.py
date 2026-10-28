@@ -103,3 +103,30 @@ def avisar_push(psql, lit, fecha, enviar_fn=None):
     for ep in quitar: psql(f"delete from push_suscripciones where endpoint = {lit(ep)}")
     print(f'push: {ok} usuario(s) avisado(s), {len(quitar)} dispositivo(s) retirado(s)')
     return ok
+
+
+def avisar_admin(psql, lit, resultados, enviar_fn=None):
+    """Una notificación para los administradores con el resultado de las cargas de esta ejecución.
+    resultados: lista de (nombre, True/False, detalle)."""
+    if not resultados: return 0
+    remitente = os.environ.get('BREVO_SENDER', '').strip() or 'docentscv@gmail.com'
+    if enviar_fn is None:
+        pem = psql("select valor from config where clave = 'vapid_privada'", tuples=True)
+        if not pem.strip(): return 0
+        enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
+    bien = [r for r in resultados if r[1]]; mal = [r for r in resultados if not r[1]]
+    if mal: titulo = f'❌ Error al cargar {len(mal)} PDF' + ('s' if len(mal) != 1 else '')
+    else: titulo = f'✅ {len(bien)} PDF cargado' + ('s' if len(bien) != 1 else '')
+    lineas = [f'{"✅" if ok else "❌"} {n}' + (f' · {str(d).splitlines()[0][:60]}' if d else '') for n, ok, d in resultados]
+    carga = {'title': titulo, 'body': '\n'.join(lineas)[:300], 'url': '/', 'tag': 'admin-carga'}
+    filas = json.loads(psql("select coalesce(jsonb_agg(t), '[]'::jsonb) from (select s.endpoint, s.p256dh, s.auth from push_suscripciones s join admins a on a.user_id = s.user_id) t", tuples=True).strip() or '[]')
+    ok, quitar = 0, []
+    for s in filas:
+        try: enviar_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); ok += 1
+        except Exception as e:
+            cod = getattr(getattr(e, 'response', None), 'status_code', None)
+            if cod in (404, 410): quitar.append(s['endpoint'])
+            else: print('push admin: error', cod, repr(e)[:120])
+    for ep in quitar: psql(f"delete from push_suscripciones where endpoint = {lit(ep)}")
+    print(f'push admin: {ok} dispositivo(s) avisado(s)')
+    return ok
