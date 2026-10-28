@@ -1,0 +1,10 @@
+name: Buscar PDF en la web de la Conselleria (prueba, no carga nada)
+on:
+  workflow_dispatch:
+jobs:
+  buscar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 buscar_pdfs.py
