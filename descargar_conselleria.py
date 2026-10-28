@@ -5,7 +5,7 @@ deja como 'pendiente' en importaciones (igual que cuando los subes tú a mano). 
 Seguridad:
   · Sin AUTO_DESCARGA=1 solo SIMULA (escribe lo que haría, no descarga ni guarda nada).
   · Solo PDF de los últimos DIAS_ATRAS días y que no estén ya registrados (mismo nombre y tipo).
-  · En las ejecuciones programadas solo actúa 1 vez por hora, de lunes a viernes, de 07:00 a 21:00 (hora de Madrid).
+  · En las ejecuciones programadas solo actúa de lunes a viernes, de 07:00 a 22:00 (hora de Madrid), como mucho cada ~25 minutos.
   · Se identifica con un nombre propio (no se hace pasar por un navegador)."""
 import os, re, sys, datetime, urllib.request, urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -23,12 +23,13 @@ NOM = re.compile(r'^(\d{2})(\d{2})(\d{2})_(lis_mae|lis_sec|pue_prov|pue_def|par)
 
 
 def toca_ahora(ahora=None):
-    """Para las ejecuciones programadas: una vez por hora, entre semana y en horario de trabajo."""
+    """Ejecuciones programadas: solo de lunes a viernes, de 07:00 a 21:59 (hora de Madrid). GitHub retrasa a veces
+    las ejecuciones programadas, por eso la frecuencia se controla con la hora de la última búsqueda (ver main)."""
     if os.environ.get('GITHUB_EVENT_NAME', 'schedule') == 'workflow_dispatch': return True
     try:
         import zoneinfo; n = (ahora or datetime.datetime.now(zoneinfo.ZoneInfo('Europe/Madrid')))
     except Exception: n = ahora or datetime.datetime.utcnow() + datetime.timedelta(hours=1)
-    return n.weekday() < 5 and 7 <= n.hour <= 21 and n.minute < 15
+    return n.weekday() < 5 and 7 <= n.hour <= 21
 
 
 def candidatos(hoy=None):
@@ -54,9 +55,17 @@ def candidatos(hoy=None):
 
 
 def main(psql, lit, limpiar):
-    if not toca_ahora(): print('Descarga automática: ahora no toca (se hace 1 vez por hora, de lunes a viernes).'); return 0
+    if not toca_ahora(): print('Descarga automática: ahora no toca (solo de lunes a viernes, de 07:00 a 22:00).'); return 0
+    manual = os.environ.get('GITHUB_EVENT_NAME', '') == 'workflow_dispatch'
+    try:                                                    # como mucho una búsqueda cada ~25 minutos (salvo si la lanzas tú a mano)
+        seg = psql("select coalesce(extract(epoch from now() - valor::timestamptz)::int, 99999) from config where clave = 'ultima_busqueda_conselleria'", tuples=True).strip()
+        if seg and int(seg) < 25 * 60 and not manual: print(f'Descarga automática: última búsqueda hace {int(seg) // 60} min; espero.'); return 0
+    except Exception: pass
     real = os.environ.get('AUTO_DESCARGA', '').strip() == '1'
     print('Descarga automática desde la Conselleria ·', 'REAL' if real else 'SIMULACIÓN (no guarda nada)')
+    if not real: print('  ATENCIÓN: AUTO_DESCARGA no está activada (variable de Actions con valor 1); solo se simula.')
+    try: psql("insert into config(clave, valor) values ('ultima_busqueda_conselleria', now()::text) on conflict (clave) do update set valor = excluded.valor")
+    except Exception as e: print('  no se pudo apuntar la hora de la búsqueda:', repr(e)[:120])
     nuevos = 0
     for n, u, tipo, cuerpo in candidatos():
         ya = psql(f"select count(*) from importaciones where nombre_original = {lit(n)} and tipo = {lit(tipo)}", tuples=True).strip()
