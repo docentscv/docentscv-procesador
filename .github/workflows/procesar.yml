@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: '*/15 * * * *'      # cada 15 minutos (GitHub puede retrasarlo unos minutos)
   workflow_dispatch:            # también se puede lanzar a mano desde la pestaña Actions
+    inputs:
+      cargar:
+        description: 'Descargar y registrar de verdad los PDF nuevos de la Conselleria (si no, solo simula)'
+        type: boolean
+        default: false
 concurrency:
   group: procesar
   cancel-in-progress: false
@@ -17,6 +22,14 @@ jobs:
           command -v pdftotext >/dev/null && command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils postgresql-client; }
       - name: Instalar librería de notificaciones
         run: pip install --quiet --break-system-packages pywebpush || pip install --quiet pywebpush
+      - name: Buscar PDF nuevos en la web de la Conselleria
+        continue-on-error: true
+        run: python3 descargar_conselleria.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AUTO_DESCARGA: ${{ (github.event_name == 'workflow_dispatch' && inputs.cargar && '1') || vars.AUTO_DESCARGA || '' }}
       - name: Procesar PDF pendientes
         run: python3 procesar_pdfs.py
         env:
