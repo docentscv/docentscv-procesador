@@ -1,7 +1,7 @@
 """Avisos por email (Brevo) cuando se cargan las plazas ofertadas de un día.
 Se envía como mucho MAXIMO emails por ejecución (el plan gratuito de Brevo permite 300 al día);
 quien no llegue recibirá el aviso en la siguiente ejecución (cada 15 min)."""
-import os, json, html, urllib.request, urllib.error, datetime
+import os, json, html, base64, urllib.request, urllib.error, datetime
 
 WEB = 'https://docentscv.github.io/'
 MAXIMO = 250
@@ -52,3 +52,54 @@ def avisar_ofertas(psql, lit, fecha, enviar_fn=enviar):
         psql(f"update perfiles set avisos_fecha = {lit(fecha)} where id = {lit(uid)}"); enviados += 1
     print(f'avisos: {enviados} enviado(s), {max(len(por) - enviados, 0)} pendiente(s)')
     return enviados
+
+
+# ---------- notificaciones push ----------
+def asegurar_vapid(psql, lit):
+    """Crea (una sola vez) el par de claves de las notificaciones push y lo guarda en la tabla config."""
+    ya = psql("select count(*) from config where clave in ('vapid_publica', 'vapid_privada')", tuples=True).strip()
+    if ya == '2': return False
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization as ser
+    k = ec.generate_private_key(ec.SECP256R1())
+    pem = k.private_bytes(ser.Encoding.PEM, ser.PrivateFormat.PKCS8, ser.NoEncryption()).decode()
+    pub = base64.urlsafe_b64encode(k.public_key().public_bytes(ser.Encoding.X962, ser.PublicFormat.UncompressedPoint)).rstrip(b'=').decode()
+    psql(f"insert into config(clave, valor) values ('vapid_publica', {lit(pub)}), ('vapid_privada', {lit(pem)}) on conflict (clave) do nothing")
+    print('push: claves VAPID creadas')
+    return True
+
+def enviar_push(clave_pem, sub, carga, remitente):
+    from pywebpush import webpush, WebPushException
+    from py_vapid import Vapid
+    webpush(subscription_info=sub, data=json.dumps(carga), vapid_private_key=Vapid.from_pem(clave_pem.encode()),
+            vapid_claims={'sub': 'mailto:' + remitente}, ttl=60 * 60 * 24)
+
+def avisar_push(psql, lit, fecha, enviar_fn=None):
+    if fecha < (datetime.date.today() - datetime.timedelta(days=1)).isoformat(): print('push: oferta antigua, no se avisa'); return 0
+    remitente = os.environ.get('BREVO_SENDER', '').strip() or 'docentscv@gmail.com'
+    if enviar_fn is None:
+        pem = psql("select valor from config where clave = 'vapid_privada'", tuples=True)
+        if not pem.strip(): print('push: aún no hay claves'); return 0
+        enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
+    txt = psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from push_ofertas_pendientes({lit(fecha)}) t", tuples=True).strip()
+    filas = json.loads(txt or '[]'); usuarios, quitar = {}, []
+    for r in filas: usuarios.setdefault(r['user_id'], []).append(r)
+    ok = 0
+    for uid, subs in usuarios.items():
+        r0 = subs[0]
+        carga = {'title': f'Plazas ofertadas el {fmt(fecha)}',
+                 'body': f'{r0["n"]} plaza{"s" if r0["n"] != 1 else ""} en tus bolsas ({r0["nv"]} vacante{"s" if r0["nv"] != 1 else ""}). Toca para ver tu mejor oportunidad.',
+                 'url': '/', 'tag': 'ofertas-' + fecha}
+        enviado = False
+        for s in subs:
+            try:
+                enviar_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); enviado = True
+            except Exception as e:
+                cod = getattr(getattr(e, 'response', None), 'status_code', None)
+                if cod in (404, 410): quitar.append(s['endpoint'])       # el dispositivo ya no existe
+                else: print('push: error', cod, repr(e)[:120])
+        if enviado:
+            psql(f"update perfiles set push_fecha = {lit(fecha)} where id = {lit(uid)}"); ok += 1
+    for ep in quitar: psql(f"delete from push_suscripciones where endpoint = {lit(ep)}")
+    print(f'push: {ok} usuario(s) avisado(s), {len(quitar)} dispositivo(s) retirado(s)')
+    return ok

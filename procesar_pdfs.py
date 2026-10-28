@@ -250,6 +250,8 @@ def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--local'); ap.add_argument('--tipo', default='continua'); ap.add_argument('--cuerpo')
     ap.add_argument('--sin-tasas', action='store_true'); a = ap.parse_args()
     hecho_otros = False; fechas_ofertas = []
+    try: avisos.asegurar_vapid(psql, lit)
+    except Exception as e: print('push: no se pudieron crear las claves:', repr(e)[:200])
     with tempfile.TemporaryDirectory() as tmp:
         if a.local:
             d = os.path.join(tmp, 'w'); os.makedirs(d)
@@ -278,6 +280,8 @@ def main():
         for f in sorted(set(fechas_ofertas)):
             try: avisos.avisar_ofertas(psql, lit, f)
             except Exception as e: print('avisos: error', repr(e)[:300])
+            try: avisos.avisar_push(psql, lit, f)
+            except Exception as e: print('push: error', repr(e)[:300])
         if hecho_otros and not a.sin_tasas:
             d = os.path.join(tmp, 'tasas'); os.makedirs(d); print('tasas:', recalcular_tasas(d))
 if __name__ == '__main__': main()
