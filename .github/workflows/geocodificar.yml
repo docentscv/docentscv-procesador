@@ -1,0 +1,15 @@
+name: Calcular coordenadas de localidades y centros
+on:
+  workflow_dispatch:
+jobs:
+  geo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar herramientas
+        run: command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
+      - name: Cargar direcciones y buscar coordenadas
+        run: python3 geocodificar_centros.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
