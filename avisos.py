@@ -131,3 +131,34 @@ def avisar_admin(psql, lit, resultados, enviar_fn=None, titulo=None):
     for ep in quitar: psql(f"delete from push_suscripciones where endpoint = {lit(ep)}")
     print(f'push admin: {ok} dispositivo(s) avisado(s)')
     return ok
+
+
+def avisar_fav(psql, lit, tipo, fecha, enviar_fn=None):
+    """Aviso push a quien tiene centros favoritos con plazas nuevas (tipo: 'ofertas' o 'dificil')."""
+    if fecha < (datetime.date.today() - datetime.timedelta(days=1)).isoformat(): print('push fav: publicación antigua, no se avisa'); return 0
+    remitente = os.environ.get('BREVO_SENDER', '').strip() or 'docentscv@gmail.com'
+    if enviar_fn is None:
+        pem = psql("select valor from config where clave = 'vapid_privada'", tuples=True)
+        if not pem.strip(): print('push fav: aún no hay claves'); return 0
+        enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
+    txt = psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from push_fav_pendientes({lit(tipo)}, {lit(fecha)}) t", tuples=True).strip()
+    usuarios, quitar, ok = {}, [], 0
+    for r in json.loads(txt or '[]'): usuarios.setdefault(r['user_id'], []).append(r)
+    for uid, subs in usuarios.items():
+        r0 = subs[0]; cen = r0['centros'] or []
+        donde = ', '.join(cen[:2]) + (f' y {len(cen) - 2} más' if len(cen) > 2 else '')
+        que = 'ofertadas' if tipo == 'ofertas' else 'de difícil cobertura'
+        carga = {'title': f'⭐ Plazas {que} en tus centros favoritos',
+                 'body': f'{r0["n"]} plaza{"s" if r0["n"] != 1 else ""} en {donde}.', 'url': '/', 'tag': f'fav-{tipo}-{fecha}'}
+        enviado = False
+        for s in subs:
+            try: enviar_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); enviado = True
+            except Exception as e:
+                cod = getattr(getattr(e, 'response', None), 'status_code', None)
+                if cod in (404, 410): quitar.append(s['endpoint'])
+                else: print('push fav: error', cod, repr(e)[:120])
+        if enviado:
+            psql(f"insert into fav_avisos(user_id, tipo, fecha) values ({lit(uid)}, {lit(tipo)}, {lit(fecha)}) on conflict do nothing"); ok += 1
+    for ep in quitar: psql(f"delete from push_suscripciones where endpoint = {lit(ep)}")
+    print(f'push fav ({tipo}): {ok} usuario(s) avisado(s)')
+    return ok

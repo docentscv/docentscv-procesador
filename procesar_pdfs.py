@@ -222,11 +222,10 @@ def procesar_dificil(nombre, ruta, d):
     try: fecha, regs = pd.leer_dificil(ruta)
     except pd.ErrorPDF as e: raise Fallo(str(e))
     f_nombre = f'20{m.group(1)}-{m.group(2)}-{m.group(3)}'
-    if m.group(4).lower() == 'prov':      # el provisional lleva dentro la fecha del día anterior: se guarda con la fecha de publicación
+    if m.group(4).lower() == 'prov':      # el provisional lleva dentro la fecha del día anterior: se guarda con esa fecha (la de publicación real)
         import datetime as _dt
         dif = (_dt.date.fromisoformat(f_nombre) - _dt.date.fromisoformat(fecha)).days
         if not 0 <= dif <= 3: raise Fallo(f'La fecha del nombre del archivo no coincide con la del PDF ({fecha}).')
-        fecha = f_nombre
     elif fecha != f_nombre: raise Fallo(f'La fecha del nombre del archivo no coincide con la del PDF ({fecha}).')
     with open(os.path.join(d, 'df.csv'), 'w', newline='', encoding='utf8') as f:
         w = csv.writer(f)
@@ -277,7 +276,7 @@ def procesar(nombre, tipo, cuerpo, ruta_pdf, d):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--local'); ap.add_argument('--tipo', default='continua'); ap.add_argument('--cuerpo')
     ap.add_argument('--sin-tasas', action='store_true'); a = ap.parse_args()
-    hecho_otros = False; fechas_ofertas = []; resultados = []
+    hecho_otros = False; fechas_ofertas = []; fechas_dificil = []; resultados = []
     try: avisos.asegurar_vapid(psql, lit)
     except Exception as e: print('push: no se pudieron crear las claves:', repr(e)[:200])
     with tempfile.TemporaryDirectory() as tmp:
@@ -300,6 +299,7 @@ def main():
                     descargar(archivo, pdf); n = procesar(nombre, tipo, cuerpo, pdf, d)
                     psql(f"update importaciones set estado = 'ok', filas = {n}, mensaje = null, procesado = now() where id = {int(iid)}")
                     if tipo == 'ofertas': fechas_ofertas.append(psql('select max(fecha) from plazas_ofertadas', tuples=True).strip())
+                    if tipo == 'dificil': fechas_dificil.append(psql('select max(fecha) from plazas_dificil', tuples=True).strip())
                     resultados.append((nombre, True, f'{n} filas'))
                     print('OK', nombre, n); hecho_otros |= cuerpo == 'otros' and tipo == 'continua'
                 except Fallo as e:
@@ -311,6 +311,11 @@ def main():
             except Exception as e: print('avisos: error', repr(e)[:300])
             try: avisos.avisar_push(psql, lit, f)
             except Exception as e: print('push: error', repr(e)[:300])
+            try: avisos.avisar_fav(psql, lit, 'ofertas', f)
+            except Exception as e: print('push fav: error', repr(e)[:300])
+        for f in sorted(set(fechas_dificil)):
+            try: avisos.avisar_fav(psql, lit, 'dificil', f)
+            except Exception as e: print('push fav: error', repr(e)[:300])
         try: avisos.avisar_admin(psql, lit, resultados)
         except Exception as e: print('push admin: error', repr(e)[:300])
         if hecho_otros and not a.sin_tasas:
