@@ -221,7 +221,13 @@ def procesar_dificil(nombre, ruta, d):
     if not m: raise Fallo('El nombre del archivo debe ser como lo publica la Conselleria: AAMMDD_pue_def.pdf (por ejemplo 261023_pue_def.pdf).')
     try: fecha, regs = pd.leer_dificil(ruta)
     except pd.ErrorPDF as e: raise Fallo(str(e))
-    if fecha != f'20{m.group(1)}-{m.group(2)}-{m.group(3)}': raise Fallo(f'La fecha del nombre del archivo no coincide con la del PDF ({fecha}).')
+    f_nombre = f'20{m.group(1)}-{m.group(2)}-{m.group(3)}'
+    if m.group(4).lower() == 'prov':      # el provisional lleva dentro la fecha del día anterior: se guarda con la fecha de publicación
+        import datetime as _dt
+        dif = (_dt.date.fromisoformat(f_nombre) - _dt.date.fromisoformat(fecha)).days
+        if not 0 <= dif <= 3: raise Fallo(f'La fecha del nombre del archivo no coincide con la del PDF ({fecha}).')
+        fecha = f_nombre
+    elif fecha != f_nombre: raise Fallo(f'La fecha del nombre del archivo no coincide con la del PDF ({fecha}).')
     with open(os.path.join(d, 'df.csv'), 'w', newline='', encoding='utf8') as f:
         w = csv.writer(f)
         for r in regs:

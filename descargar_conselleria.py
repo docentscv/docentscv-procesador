@@ -46,11 +46,13 @@ def candidatos(hoy=None):
             if f < lim or f > hoy + datetime.timedelta(days=2): continue
             clase = m.group(4).lower().split('_')[0]          # 'lis' o 'pue'
             tipo = reglas.get(clase)
-            if tipo == 'dificil' and m.group(4).lower() == 'pue_prov': continue    # el provisional de difícil cobertura lleva la fecha del día anterior dentro del PDF; solo cargamos el definitivo
+            if tipo == 'dificil' and m.group(4).lower() == 'pue_prov' and any(x[0].lower() == n.lower().replace('pue_prov', 'pue_def') for x in out): continue   # si ya está el definitivo, el provisional sobra
             if not tipo or (n, tipo) in vistos: continue
             vistos.add((n, tipo))
             cuerpo = ('maestros' if n.lower().endswith('_lis_mae.pdf') else 'otros') if tipo == 'continua' else 'todos'
             out.append((n, u, tipo, cuerpo))
+    out = [x for x in out if not (x[2] == 'dificil' and x[0].lower().endswith('pue_prov.pdf') and any(y[0].lower() == x[0].lower().replace('pue_prov', 'pue_def') for y in out))]
+    out.sort(key=lambda x: x[0].lower().endswith('pue_def.pdf'))   # primero provisionales, luego definitivos
     return out
 
 
