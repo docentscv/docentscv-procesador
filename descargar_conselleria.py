@@ -54,8 +54,35 @@ def candidatos(hoy=None):
     return out
 
 
+def ahora_madrid():
+    try:
+        import zoneinfo; return datetime.datetime.now(zoneinfo.ZoneInfo('Europe/Madrid'))
+    except Exception: return datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+
+
+def vigilar_continua(psql, lit, ahora=None):
+    """Los martes y jueves (días de adjudicación continua), a partir de las 15:00, si todavía no están cargadas las dos listas
+    de ese día (maestros y secundaria/otros) avisa UNA vez al día a los administradores por notificación push."""
+    n = ahora or ahora_madrid()
+    if n.weekday() not in (1, 3) or n.hour < 15: return False
+    pref = n.strftime('%y%m%d') + '_lis'
+    hechas = psql(f"select count(distinct cuerpo) from importaciones where tipo = 'continua' and estado <> 'error' and nombre_original ilike {lit(pref + '%')}", tuples=True).strip()
+    if hechas == '2': return False
+    ya = psql("select valor from config where clave = 'aviso_falta_continua'", tuples=True).strip()
+    if ya == n.date().isoformat(): return False
+    psql(f"insert into config(clave, valor) values ('aviso_falta_continua', {lit(n.date().isoformat())}) on conflict (clave) do update set valor = excluded.valor")
+    print('VIGILANTE: hoy hay adjudicación continua y aún no están cargadas las dos listas (' + str(hechas) + ' de 2). Aviso a los administradores.')
+    try:
+        import avisos
+        avisos.avisar_admin(psql, lit, [(f'Adjudicación continua de hoy: {hechas} de 2 listas cargadas', False, 'Mira Administración o súbelas a mano')], titulo='⚠️ Falta la adjudicación continua de hoy')
+    except Exception as e: print('  no se pudo avisar:', repr(e)[:120])
+    return True
+
+
 def main(psql, lit, limpiar):
     if not toca_ahora(): print('Descarga automática: ahora no toca (solo de lunes a viernes, de 07:00 a 22:00).'); return 0
+    try: vigilar_continua(psql, lit)
+    except Exception as e: print('  vigilante:', repr(e)[:120])
     manual = os.environ.get('GITHUB_EVENT_NAME', '') == 'workflow_dispatch'
     try:                                                    # como mucho una búsqueda cada ~25 minutos (salvo si la lanzas tú a mano)
         seg = psql("select coalesce(extract(epoch from now() - valor::timestamptz)::int, 99999) from config where clave = 'ultima_busqueda_conselleria'", tuples=True).strip()

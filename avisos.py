@@ -105,7 +105,7 @@ def avisar_push(psql, lit, fecha, enviar_fn=None):
     return ok
 
 
-def avisar_admin(psql, lit, resultados, enviar_fn=None):
+def avisar_admin(psql, lit, resultados, enviar_fn=None, titulo=None):
     """Una notificación para los administradores con el resultado de las cargas de esta ejecución.
     resultados: lista de (nombre, True/False, detalle)."""
     if not resultados: return 0
@@ -115,7 +115,8 @@ def avisar_admin(psql, lit, resultados, enviar_fn=None):
         if not pem.strip(): return 0
         enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
     bien = [r for r in resultados if r[1]]; mal = [r for r in resultados if not r[1]]
-    if mal: titulo = f'❌ Error al cargar {len(mal)} PDF' + ('s' if len(mal) != 1 else '')
+    if titulo: pass
+    elif mal: titulo = f'❌ Error al cargar {len(mal)} PDF' + ('s' if len(mal) != 1 else '')
     else: titulo = f'✅ {len(bien)} PDF cargado' + ('s' if len(bien) != 1 else '')
     lineas = [f'{"✅" if ok else "❌"} {n}' + (f' · {str(d).splitlines()[0][:60]}' if d else '') for n, ok, d in resultados]
     carga = {'title': titulo, 'body': '\n'.join(lineas)[:300], 'url': '/', 'tag': 'admin-carga'}
