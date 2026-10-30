@@ -197,3 +197,34 @@ def avisar_mensajes(psql, lit, enviar_fn=None):
     n = avisar_admin(psql, lit, res, enviar_fn=enviar_fn, titulo='💬 ' + (f'{len(filas)} mensajes nuevos' if len(filas) > 1 else 'Mensaje nuevo') + ' en DocentsCV', icono='•')
     psql("update mensajes set avisado = true where id in (" + ','.join(str(int(f['id'])) for f in filas) + ")")
     return n
+
+
+def avisar_continua(psql, lit, fecha, grupo, enviar_fn=None):
+    """Aviso push a quien sigue en la bolsa SIN plaza cuando se carga una adjudicación continua nueva (grupo: 'maestros' u 'otros').
+    Todos reciben el mismo mensaje (también quien acaba de volver a estar disponible)."""
+    if fecha < (datetime.date.today() - datetime.timedelta(days=2)).isoformat(): print('push continua: lista antigua, no se avisa'); return 0
+    remitente = os.environ.get('BREVO_SENDER', '').strip() or 'docentscv@gmail.com'
+    if enviar_fn is None:
+        pem = psql("select valor from config where clave = 'vapid_privada'", tuples=True)
+        if not pem.strip(): print('push continua: aún no hay claves'); return 0
+        enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
+    txt = psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from push_continua_pendientes({lit(fecha)}, {lit(grupo)}) t", tuples=True).strip()
+    usuarios, quitar, ok = {}, [], 0
+    for r in json.loads(txt or '[]'): usuarios.setdefault(r['user_id'], []).append(r)
+    cuerpo = 'Maestros' if grupo == 'maestros' else 'Secundaria y otros cuerpos'
+    for uid, subs in usuarios.items():
+        r0 = subs[0]; bolsa = (r0['bolsa'] or '')[:40]
+        donde = f'en {bolsa}' if r0['nlistas'] == 1 else f'en {r0["nlistas"]} bolsas (la mejor, {bolsa})'
+        carga = {'title': f'📢 Nueva adjudicación continua · {cuerpo} · {fmt(fecha)}', 'body': f'Sigues sin plaza: vas el nº {r0["pos"]} {donde}. Mira si has subido y qué plazas hay. ¡No lo dejes pasar!', 'url': '/', 'tag': f'continua-{grupo}-{fecha}'}
+        enviado = False
+        for s in subs:
+            try: enviar_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); enviado = True
+            except Exception as e:
+                cod = getattr(getattr(e, 'response', None), 'status_code', None)
+                if cod in (404, 410): quitar.append(s['endpoint'])
+                else: print('push continua: error', cod, repr(e)[:120])
+        if enviado:
+            psql(f"insert into avisos_continua(user_id, fecha, grupo) values ({lit(uid)}, {lit(fecha)}, {lit(grupo)}) on conflict do nothing"); ok += 1
+    for ep in quitar: psql(f"delete from push_suscripciones where endpoint = {lit(ep)}")
+    print(f'push continua ({grupo}): {ok} usuario(s) avisado(s)')
+    return ok

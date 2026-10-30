@@ -276,7 +276,7 @@ def procesar(nombre, tipo, cuerpo, ruta_pdf, d):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--local'); ap.add_argument('--tipo', default='continua'); ap.add_argument('--cuerpo')
     ap.add_argument('--sin-tasas', action='store_true'); a = ap.parse_args()
-    hecho_otros = False; fechas_ofertas = []; fechas_dificil = []; resultados = []
+    hecho_otros = False; fechas_ofertas = []; fechas_dificil = []; grupos_continua = set(); resultados = []
     try: avisos.asegurar_vapid(psql, lit)
     except Exception as e: print('push: no se pudieron crear las claves:', repr(e)[:200])
     with tempfile.TemporaryDirectory() as tmp:
@@ -299,6 +299,7 @@ def main():
                     descargar(archivo, pdf); n = procesar(nombre, tipo, cuerpo, pdf, d)
                     psql(f"update importaciones set estado = 'ok', filas = {n}, mensaje = null, procesado = now() where id = {int(iid)}")
                     if tipo == 'ofertas': fechas_ofertas.append(psql('select max(fecha) from plazas_ofertadas', tuples=True).strip())
+                    if tipo == 'continua': grupos_continua.add('maestros' if cuerpo == 'maestros' else 'otros')
                     if tipo == 'dificil': fechas_dificil.append(psql('select max(fecha) from plazas_dificil', tuples=True).strip())
                     resultados.append((nombre, True, f'{n} filas', tipo))
                     print('OK', nombre, n); hecho_otros |= cuerpo == 'otros' and tipo == 'continua'
@@ -316,6 +317,11 @@ def main():
         for f in sorted(set(fechas_dificil)):
             try: avisos.avisar_fav(psql, lit, 'dificil', f)
             except Exception as e: print('push fav: error', repr(e)[:300])
+        for g in sorted(grupos_continua):
+            try:
+                f = psql(f"select max(fecha) from instantaneas where tipo = 'continua' and grupo = {lit(g)}", tuples=True).strip()
+                if f: avisos.avisar_continua(psql, lit, f, g)
+            except Exception as e: print('push continua: error', repr(e)[:300])
         try: avisos.avisar_mensajes(psql, lit)
         except Exception as e: print('mensajes: error', repr(e)[:300])
         try: avisos.avisar_admin(psql, lit, resultados)
