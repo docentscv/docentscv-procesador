@@ -316,6 +316,8 @@ def main():
         for f in sorted(set(fechas_dificil)):
             try: avisos.avisar_fav(psql, lit, 'dificil', f)
             except Exception as e: print('push fav: error', repr(e)[:300])
+        try: avisos.avisar_mensajes(psql, lit)
+        except Exception as e: print('mensajes: error', repr(e)[:300])
         try: avisos.avisar_admin(psql, lit, resultados)
         except Exception as e: print('push admin: error', repr(e)[:300])
         if hecho_otros and not a.sin_tasas:

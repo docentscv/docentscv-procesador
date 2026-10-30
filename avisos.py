@@ -105,7 +105,7 @@ def avisar_push(psql, lit, fecha, enviar_fn=None):
     return ok
 
 
-def avisar_admin(psql, lit, resultados, enviar_fn=None, titulo=None):
+def avisar_admin(psql, lit, resultados, enviar_fn=None, titulo=None, icono=None):
     """Una notificación para los administradores con el resultado de las cargas de esta ejecución.
     resultados: lista de (nombre, True/False, detalle)."""
     if not resultados: return 0
@@ -118,8 +118,8 @@ def avisar_admin(psql, lit, resultados, enviar_fn=None, titulo=None):
     if titulo: pass
     elif mal: titulo = f'❌ Error al cargar {len(mal)} PDF' + ('s' if len(mal) != 1 else '')
     else: titulo = f'✅ {len(bien)} PDF cargado' + ('s' if len(bien) != 1 else '')
-    lineas = [f'{"✅" if ok else "❌"} {n}' + (f' · {str(d).splitlines()[0][:60]}' if d else '') for n, ok, d in resultados]
-    carga = {'title': titulo, 'body': '\n'.join(lineas)[:300], 'url': '/', 'tag': 'admin-carga'}
+    lineas = [f'{icono if icono is not None else ("✅" if ok else "❌")} {n}' + (f' · {str(d).splitlines()[0][:60]}' if d else '') for n, ok, d in resultados]
+    carga = {'title': titulo, 'body': '\n'.join(lineas)[:300], 'url': '/', 'tag': 'admin-' + (icono and 'msg' or 'carga')}
     filas = json.loads(psql("select coalesce(jsonb_agg(t), '[]'::jsonb) from (select s.endpoint, s.p256dh, s.auth from push_suscripciones s join admins a on a.user_id = s.user_id) t", tuples=True).strip() or '[]')
     ok, quitar = 0, []
     for s in filas:
@@ -162,3 +162,15 @@ def avisar_fav(psql, lit, tipo, fecha, enviar_fn=None):
     for ep in quitar: psql(f"delete from push_suscripciones where endpoint = {lit(ep)}")
     print(f'push fav ({tipo}): {ok} usuario(s) avisado(s)')
     return ok
+
+
+def avisar_mensajes(psql, lit, enviar_fn=None):
+    """Avisa a los administradores (push) de los mensajes nuevos de sugerencias/reclamaciones."""
+    txt = psql("select coalesce(jsonb_agg(t), '[]'::jsonb) from (select id, tipo, texto from mensajes where not avisado order by id limit 5) t", tuples=True).strip()
+    filas = json.loads(txt or '[]')
+    if not filas: return 0
+    nombres = {'sugerencia': 'Sugerencia', 'reclamacion': 'Reclamación', 'error': 'Error', 'otro': 'Mensaje'}
+    res = [(nombres.get(f['tipo'], 'Mensaje'), True, ' '.join(f['texto'].split())[:70]) for f in filas]
+    n = avisar_admin(psql, lit, res, enviar_fn=enviar_fn, titulo='💬 ' + (f'{len(filas)} mensajes nuevos' if len(filas) > 1 else 'Mensaje nuevo') + ' en DocentsCV', icono='•')
+    psql("update mensajes set avisado = true where id in (" + ','.join(str(int(f['id'])) for f in filas) + ")")
+    return n
