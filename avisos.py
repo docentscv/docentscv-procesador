@@ -68,10 +68,20 @@ def asegurar_vapid(psql, lit):
     print('push: claves VAPID creadas')
     return True
 
-def enviar_push(clave_pem, sub, carga, remitente):
-    from pywebpush import webpush, WebPushException
+def _vapid(clave_pem):
+    """Clave privada de las notificaciones. psql devuelve el PEM con una línea en blanco al final, y eso hacía fallar a
+    Vapid.from_pem («Could not deserialize key data»): por eso se recorta, y si aun así falla se construye desde el valor numérico."""
     from py_vapid import Vapid
-    webpush(subscription_info=sub, data=json.dumps(carga), vapid_private_key=Vapid.from_pem(clave_pem.encode()),
+    pem = clave_pem.strip()
+    try: return Vapid.from_pem(pem.encode())
+    except Exception:
+        from cryptography.hazmat.primitives import serialization as ser
+        k = ser.load_pem_private_key(pem.encode(), password=None)
+        return Vapid.from_raw(base64.urlsafe_b64encode(k.private_numbers().private_value.to_bytes(32, 'big')).rstrip(b'='))
+
+def enviar_push(clave_pem, sub, carga, remitente):
+    from pywebpush import webpush
+    webpush(subscription_info=sub, data=json.dumps(carga), vapid_private_key=_vapid(clave_pem),
             vapid_claims={'sub': 'mailto:' + remitente}, ttl=60 * 60 * 24)
 
 def avisar_push(psql, lit, fecha, enviar_fn=None):
