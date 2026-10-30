@@ -300,12 +300,12 @@ def main():
                     psql(f"update importaciones set estado = 'ok', filas = {n}, mensaje = null, procesado = now() where id = {int(iid)}")
                     if tipo == 'ofertas': fechas_ofertas.append(psql('select max(fecha) from plazas_ofertadas', tuples=True).strip())
                     if tipo == 'dificil': fechas_dificil.append(psql('select max(fecha) from plazas_dificil', tuples=True).strip())
-                    resultados.append((nombre, True, f'{n} filas'))
+                    resultados.append((nombre, True, f'{n} filas', tipo))
                     print('OK', nombre, n); hecho_otros |= cuerpo == 'otros' and tipo == 'continua'
                 except Fallo as e:
-                    psql(f"update importaciones set estado = 'error', mensaje = {lit(str(e)[:500])}, procesado = now() where id = {int(iid)}"); print('ERROR', nombre, e); resultados.append((nombre, False, str(e)[:90]))
+                    psql(f"update importaciones set estado = 'error', mensaje = {lit(str(e)[:500])}, procesado = now() where id = {int(iid)}"); print('ERROR', nombre, e); resultados.append((nombre, False, str(e)[:90], tipo))
                 except Exception as e:
-                    psql(f"update importaciones set estado = 'error', mensaje = {lit('Error inesperado: ' + str(e)[:400])}, procesado = now() where id = {int(iid)}"); print('ERROR', nombre, repr(e)); resultados.append((nombre, False, 'error inesperado'))
+                    psql(f"update importaciones set estado = 'error', mensaje = {lit('Error inesperado: ' + str(e)[:400])}, procesado = now() where id = {int(iid)}"); print('ERROR', nombre, repr(e)); resultados.append((nombre, False, 'error inesperado', tipo))
         for f in sorted(set(fechas_ofertas)):
             try: avisos.avisar_ofertas(psql, lit, f)
             except Exception as e: print('avisos: error', repr(e)[:300])

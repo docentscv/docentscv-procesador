@@ -1,7 +1,7 @@
 """Avisos por email (Brevo) cuando se cargan las plazas ofertadas de un día.
 Se envía como mucho MAXIMO emails por ejecución (el plan gratuito de Brevo permite 300 al día);
 quien no llegue recibirá el aviso en la siguiente ejecución (cada 15 min)."""
-import os, json, html, base64, urllib.request, urllib.error, datetime
+import os, re, json, html, base64, urllib.request, urllib.error, datetime
 
 WEB = 'https://docentscv.github.io/'
 MAXIMO = 250
@@ -97,8 +97,8 @@ def avisar_push(psql, lit, fecha, enviar_fn=None):
     ok = 0
     for uid, subs in usuarios.items():
         r0 = subs[0]
-        carga = {'title': f'Plazas ofertadas el {fmt(fecha)}',
-                 'body': f'{r0["n"]} plaza{"s" if r0["n"] != 1 else ""} en tus bolsas ({r0["nv"]} vacante{"s" if r0["nv"] != 1 else ""}). Toca para ver tu mejor oportunidad.',
+        carga = {'title': f'📢 Nuevas plazas ofertadas · {fmt(fecha)}',
+                 'body': f'{r0["n"]} plaza{"s" if r0["n"] != 1 else ""} en tus bolsas ({r0["nv"]} vacante{"s" if r0["nv"] != 1 else ""}). ¡No lo dejes pasar! Toca para ver tu mejor oportunidad.',
                  'url': '/', 'tag': 'ofertas-' + fecha}
         enviado = False
         for s in subs:
@@ -115,6 +115,16 @@ def avisar_push(psql, lit, fecha, enviar_fn=None):
     return ok
 
 
+def descripcion(nombre, tipo=None):
+    """Texto claro de qué datos son, a partir del nombre del PDF de la Conselleria (p. ej. 261030_pue_def.pdf)."""
+    n = (nombre or '').lower(); m = re.match(r'^(\d{2})(\d{2})(\d{2})_', n); f = f' ({m.group(3)}/{m.group(2)})' if m else ''
+    if tipo == 'continua' or '_lis_' in n: return 'Adjudicación continua de ' + ('Maestros' if '_lis_mae' in n else 'Secundaria y otros cuerpos') + f
+    if tipo == 'dificil_adj' or n.endswith('_par.pdf'): return 'Adjudicaciones de difícil cobertura' + f
+    if tipo == 'dificil': return 'Plazas de difícil cobertura' + f
+    if tipo == 'ofertas' or '_pue_' in n: return 'Plazas ofertadas' + f
+    if tipo == 'inicio_curso': return 'Listas de inicio de curso'
+    return nombre
+
 def avisar_admin(psql, lit, resultados, enviar_fn=None, titulo=None, icono=None):
     """Una notificación para los administradores con el resultado de las cargas de esta ejecución.
     resultados: lista de (nombre, True/False, detalle)."""
@@ -125,10 +135,13 @@ def avisar_admin(psql, lit, resultados, enviar_fn=None, titulo=None, icono=None)
         if not pem.strip(): return 0
         enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
     bien = [r for r in resultados if r[1]]; mal = [r for r in resultados if not r[1]]
-    if titulo: pass
-    elif mal: titulo = f'❌ Error al cargar {len(mal)} PDF' + ('s' if len(mal) != 1 else '')
-    else: titulo = f'✅ {len(bien)} PDF cargado' + ('s' if len(bien) != 1 else '')
-    lineas = [f'{icono if icono is not None else ("✅" if ok else "❌")} {n}' + (f' · {str(d).splitlines()[0][:60]}' if d else '') for n, ok, d in resultados]
+    if titulo is None and icono is None:      # carga normal de PDF: mensaje claro y cercano
+        titulo = '📢 Nuevos datos subidos a DocentsCV' if not mal else ('⚠️ Carga con errores en DocentsCV' if bien else '❌ Error al cargar datos en DocentsCV')
+        lineas = ['• ' + descripcion(r[0], r[3] if len(r) > 3 else None) for r in bien]
+        lineas += [f'❌ {r[0]}' + (f' · {str(r[2]).splitlines()[0][:70]}' if r[2] else '') for r in mal]
+        if not mal: lineas.append('¡No lo dejes pasar! 👀')
+    else:
+        lineas = [f'{icono if icono is not None else ("✅" if r[1] else "❌")} {r[0]}' + (f' · {str(r[2]).splitlines()[0][:60]}' if r[2] else '') for r in resultados]
     carga = {'title': titulo, 'body': '\n'.join(lineas)[:300], 'url': '/', 'tag': 'admin-' + (icono and 'msg' or 'carga')}
     filas = json.loads(psql("select coalesce(jsonb_agg(t), '[]'::jsonb) from (select s.endpoint, s.p256dh, s.auth from push_suscripciones s join admins a on a.user_id = s.user_id) t", tuples=True).strip() or '[]')
     ok, quitar = 0, []
@@ -159,7 +172,7 @@ def avisar_fav(psql, lit, tipo, fecha, enviar_fn=None):
         donde = ', '.join(cen[:2]) + (f' y {len(cen) - 2} más' if len(cen) > 2 else '')
         que = 'ofertadas' if tipo == 'ofertas' else 'de difícil cobertura'
         carga = {'title': f'⭐ Plazas {que} en tus centros favoritos',
-                 'body': f'{r0["n"]} plaza{"s" if r0["n"] != 1 else ""} en {donde}.', 'url': '/', 'tag': f'fav-{tipo}-{fecha}'}
+                 'body': f'{r0["n"]} plaza{"s" if r0["n"] != 1 else ""} en {donde}. ¡No lo dejes pasar!', 'url': '/', 'tag': f'fav-{tipo}-{fecha}'}
         enviado = False
         for s in subs:
             try: enviar_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); enviado = True
