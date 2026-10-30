@@ -8,6 +8,10 @@ on:
         description: 'Descargar y registrar de verdad los PDF nuevos de la Conselleria (si no, solo simula)'
         type: boolean
         default: false
+      probar_avisos:
+        description: 'Enviar una notificación y un email de PRUEBA solo a los administradores'
+        type: boolean
+        default: false
 concurrency:
   group: procesar
   cancel-in-progress: false
@@ -32,6 +36,14 @@ jobs:
           AUTO_DESCARGA: ${{ (github.event_name == 'workflow_dispatch' && inputs.cargar && '1') || vars.AUTO_DESCARGA || '' }}
       - name: Procesar PDF pendientes
         run: python3 procesar_pdfs.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+      - name: Probar avisos (solo si se pide a mano; avisa solo a administradores)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.probar_avisos }}
+        run: python3 probar_avisos.py
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
