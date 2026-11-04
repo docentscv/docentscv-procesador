@@ -192,7 +192,7 @@ def avisar_mensajes(psql, lit, enviar_fn=None):
     txt = psql("select coalesce(jsonb_agg(t), '[]'::jsonb) from (select id, tipo, texto from mensajes where not avisado order by id limit 5) t", tuples=True).strip()
     filas = json.loads(txt or '[]')
     if not filas: return 0
-    nombres = {'sugerencia': 'Sugerencia', 'reclamacion': 'Reclamación', 'error': 'Error', 'otro': 'Mensaje'}
+    nombres = {'especialidad': 'Cambio de especialidad', 'sugerencia': 'Sugerencia', 'reclamacion': 'Reclamación', 'error': 'Error', 'otro': 'Mensaje'}
     res = [(nombres.get(f['tipo'], 'Mensaje'), True, ' '.join(f['texto'].split())[:70]) for f in filas]
     n = avisar_admin(psql, lit, res, enviar_fn=enviar_fn, titulo='💬 ' + (f'{len(filas)} mensajes nuevos' if len(filas) > 1 else 'Mensaje nuevo') + ' en DocentsCV', icono='•')
     psql("update mensajes set avisado = true where id in (" + ','.join(str(int(f['id'])) for f in filas) + ")")
