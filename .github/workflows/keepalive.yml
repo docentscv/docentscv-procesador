@@ -1,0 +1,20 @@
+name: Mantener Supabase despierto
+on:
+  schedule:
+    - cron: '17 5 */6 * *'     # cada 6 días (días 1, 7, 13, 19, 25 y 31 del mes), 05:17 UTC
+  workflow_dispatch:
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Llamar a Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          curl -fsS -X POST "$SUPABASE_URL/rest/v1/rpc/keepalive" \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/json" -d '{}'
+          echo
+          echo "Supabase responde: OK"
