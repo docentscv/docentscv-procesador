@@ -320,12 +320,11 @@ def main():
         for g in sorted(grupos_continua):
             try:
                 f = psql(f"select max(fecha) from instantaneas where tipo = 'continua' and grupo = {lit(g)}", tuples=True).strip()
-            except Exception as e: print('continua: no se pudo leer la fecha', repr(e)[:300]); continue
-            if not f: continue
-            try: avisos.avisar_continua(psql, lit, f, g)
+                if f:
+                    try: avisos.avisar_eventos(psql, lit, f, g)
+                    except Exception as e: print('eventos continua: error', repr(e)[:300])
+                    avisos.avisar_continua(psql, lit, f, g)
             except Exception as e: print('push continua: error', repr(e)[:300])
-            try: avisos.avisar_adjudicados(psql, lit, f, g)       # email y notificación a quien aparece adjudicado
-            except Exception as e: print('adjudicados: error', repr(e)[:300])
         try: avisos.avisar_mensajes(psql, lit)
         except Exception as e: print('mensajes: error', repr(e)[:300])
         try: avisos.avisar_admin(psql, lit, resultados)

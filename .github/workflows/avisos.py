@@ -27,10 +27,9 @@ def construir(fecha, token, filas):
                 f'\n\nVer mis oportunidades: {WEB}\n\nPara dejar de recibir avisos: {baja}\n')
     return asunto, cuerpo_h, cuerpo_t, baja
 
-def enviar(api_key, remitente, destino, asunto, cuerpo_h, cuerpo_t, baja=None):
+def enviar(api_key, remitente, destino, asunto, cuerpo_h, cuerpo_t, baja):
     datos = {'sender': {'name': 'DocentsCV', 'email': remitente}, 'to': [{'email': destino}], 'subject': asunto,
-             'htmlContent': cuerpo_h, 'textContent': cuerpo_t}
-    if baja: datos['headers'] = {'List-Unsubscribe': f'<{baja}>'}
+             'htmlContent': cuerpo_h, 'textContent': cuerpo_t, 'headers': {'List-Unsubscribe': f'<{baja}>'}}
     rq = urllib.request.Request('https://api.brevo.com/v3/smtp/email', data=json.dumps(datos).encode(),
                                 headers={'api-key': api_key, 'content-type': 'application/json', 'accept': 'application/json'})
     with urllib.request.urlopen(rq, timeout=30) as r: return r.status
@@ -193,7 +192,7 @@ def avisar_mensajes(psql, lit, enviar_fn=None):
     txt = psql("select coalesce(jsonb_agg(t), '[]'::jsonb) from (select id, tipo, texto from mensajes where not avisado order by id limit 5) t", tuples=True).strip()
     filas = json.loads(txt or '[]')
     if not filas: return 0
-    nombres = {'sugerencia': 'Sugerencia', 'reclamacion': 'Reclamación', 'error': 'Error', 'otro': 'Mensaje'}
+    nombres = {'especialidad': 'Cambio de especialidad', 'sugerencia': 'Sugerencia', 'reclamacion': 'Reclamación', 'error': 'Error', 'otro': 'Mensaje'}
     res = [(nombres.get(f['tipo'], 'Mensaje'), True, ' '.join(f['texto'].split())[:70]) for f in filas]
     n = avisar_admin(psql, lit, res, enviar_fn=enviar_fn, titulo='💬 ' + (f'{len(filas)} mensajes nuevos' if len(filas) > 1 else 'Mensaje nuevo') + ' en DocentsCV', icono='•')
     psql("update mensajes set avisado = true where id in (" + ','.join(str(int(f['id'])) for f in filas) + ")")
@@ -231,75 +230,57 @@ def avisar_continua(psql, lit, fecha, grupo, enviar_fn=None):
     return ok
 
 
-# ---------- aviso personal a quien ha sido ADJUDICADO (email + notificación) ----------
-def _plural(n, uno, varios): return uno if n == 1 else varios
+# ---------- avisos de adjudicación continua: «te han dado plaza» y «vuelves a estar en bolsa» ----------
+def _txt_evento(r, fecha):
+    """(titulo, cuerpo corto, asunto, titular del email, párrafo del email) según el tipo de aviso."""
+    if r['tipo'] == 'plaza':
+        donde = ' · '.join(x for x in [(r.get('centro') or '').strip(), (r.get('localidad') or '').strip().title()] if x)
+        esp = (r.get('especialidad') or '').strip()
+        corto = (donde + (f' · {esp}' if esp else '')) or f'Bolsa: {(r["bolsa"] or "")[:40]}'
+        return ('🎉 ¡Te han dado plaza!', corto + '. Mira los detalles en DocentsCV.',
+                f'🎉 Te han dado plaza · adjudicación continua del {fmt(fecha)}', '¡Te han dado plaza!',
+                f'En la adjudicación continua del {fmt(fecha)} figura una plaza para ti ({corto}). Compruébalo en DocentsCV y en la web de la Conselleria: lo que vale es la resolución oficial.')
+    return ('🔄 Vuelves a estar en bolsa', f'Ya no tienes plaza adjudicada y vuelves a la bolsa (nº {r["pos"]}). ¡No pierdas la oportunidad de conseguir nuevas plazas!',
+            f'🔄 Vuelves a estar en bolsa · adjudicación continua del {fmt(fecha)}', 'Vuelves a estar en bolsa',
+            f'En la adjudicación continua del {fmt(fecha)} ya no tienes plaza adjudicada y vuelves a estar disponible en la bolsa (nº {r["pos"]}). No pierdas la oportunidad de conseguir nuevas plazas: mira qué hay en DocentsCV.')
 
-def _plaza_txt(r):
-    """Líneas de texto de una plaza adjudicada (fila de adjudicados_pendientes)."""
-    tipo = 'Vacante (hasta final de curso)' if (r.get('tipo') or '') == 'vacante' else 'Sustitución' + (f' · {r["detalle"]}' if r.get('detalle') else '')
-    donde = ', '.join(x for x in (r.get('localidad'), r.get('provincia')) if x)
-    lineas = [('Centro', r.get('centro') or '—'), ('Localidad', donde or '—'), ('Especialidad', r.get('especialidad') or '—'), ('Tipo', tipo)]
-    if r.get('horas') not in (None, ''):
-        try: lineas.append(('Jornada', f'{float(r["horas"]):g} h'))
-        except (TypeError, ValueError): pass
-    if r.get('lista'): lineas.append(('Bolsa', f'{r["lista"]} · posición {r["posicion"]}'))
-    return lineas
 
-def construir_adjudicado(fecha, filas):
-    """Asunto y cuerpos (HTML y texto) del email a una persona adjudicada. filas: sus plazas de esa lista (normalmente 1)."""
-    n = len(filas)
-    asunto = f'🎉 {_plural(n, "Te han adjudicado una plaza", "Te han adjudicado plazas")} · adjudicación continua del {fmt(fecha)}'
-    bloques_h, bloques_t = [], []
-    for r in filas:
-        ls = _plaza_txt(r)
-        bloques_h.append('<table style="border-collapse:collapse;margin:12px 0">' + ''.join(
-            f'<tr><td style="padding:3px 14px 3px 0;color:#667">{html.escape(k)}</td><td style="padding:3px 0"><b>{html.escape(str(v))}</b></td></tr>' for k, v in ls) + '</table>')
-        bloques_t.append('\n'.join(f'{k}: {v}' for k, v in ls))
-    aviso = ('Comprueba siempre los datos en la resolución oficial de la Conselleria: DocentsCV es una herramienta orientativa y no oficial.')
-    ch = (f'<div style="font-family:Arial,sans-serif;font-size:15px;color:#1a2433;max-width:560px">'
-          f'<h2 style="margin:0 0 8px">¡Enhorabuena! {_plural(n, "Te han adjudicado una plaza", "Te han adjudicado plazas")}</h2>'
-          f'<p style="margin:0">En la adjudicación continua del {fmt(fecha)} aparece tu nombre con:</p>{"".join(bloques_h)}'
-          f'<p style="margin:20px 0 6px"><a href="{WEB}" style="background:#0F7B8A;color:#fff;padding:10px 16px;border-radius:8px;text-decoration:none;display:inline-block">Ver en DocentsCV</a></p>'
-          f'<p style="font-size:13px;color:#445;margin-top:18px">{html.escape(aviso)}</p>'
-          f'<p style="font-size:12px;color:#667;margin-top:18px">Recibes este aviso porque lo tienes activado en Mi apartado de DocentsCV. Puedes desactivarlo en «Ajustes y avisos».</p></div>')
-    ct = (f'¡Enhorabuena! {_plural(n, "Te han adjudicado una plaza", "Te han adjudicado plazas")}\n\nEn la adjudicación continua del {fmt(fecha)} aparece tu nombre con:\n\n' +
-          '\n\n'.join(bloques_t) + f'\n\nVer en DocentsCV: {WEB}\n\n{aviso}\n\nPuedes desactivar estos avisos en Mi apartado → Ajustes y avisos.\n')
-    return asunto, ch, ct
-
-def avisar_adjudicados(psql, lit, fecha, grupo, enviar_fn=enviar, push_fn=None):
-    """Email (Brevo) y notificación a quien aparece ADJUDICADO en la adjudicación continua recién cargada (grupo: 'maestros' u 'otros').
-    Solo a quien tiene su nombre vinculado en Mi apartado, tiene acceso activo y tiene activados los avisos. Cada persona recibe el aviso una sola vez."""
-    if fecha < (datetime.date.today() - datetime.timedelta(days=2)).isoformat(): print('adjudicados: lista antigua, no se avisa'); return 0
+def avisar_eventos(psql, lit, fecha, grupo, enviar_mail=enviar, enviar_fn=None):
+    """Dos avisos por email (si lo tiene activado) y por notificación (si la tiene activa), una sola vez por persona y lista:
+    'plaza' = te han adjudicado plaza; 'vuelve' = tenías plaza y vuelves a estar en bolsa sin ella."""
+    if fecha < (datetime.date.today() - datetime.timedelta(days=2)).isoformat(): print('eventos: lista antigua, no se avisa'); return 0
     clave = os.environ.get('BREVO_API_KEY', '').strip().strip('"\'')
     remitente = os.environ.get('BREVO_SENDER', '').strip() or 'docentscv@gmail.com'
-    pem = None
-    if push_fn is None:
-        pem = psql("select valor from config where clave = 'vapid_privada'", tuples=True).strip()
-        if pem: push_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
-    if not clave and push_fn is None: print('adjudicados: falta BREVO_API_KEY y no hay claves de notificaciones; no se envía nada'); return 0
-    txt = psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from adjudicados_pendientes({lit(fecha)}, {lit(grupo)}) t", tuples=True).strip()
-    por = {}
-    for r in json.loads(txt or '[]'): por.setdefault(r['user_id'], []).append(r)
-    enviados = 0
-    for uid, filas in list(por.items())[:MAXIMO]:
-        hecho = False
-        if clave:
-            asunto, ch, ct = construir_adjudicado(fecha, filas)
-            try: enviar_fn(clave, remitente, filas[0]['email'], asunto, ch, ct); hecho = True
-            except urllib.error.HTTPError as e:
-                print('adjudicados: error de Brevo', e.code, e.read().decode()[:200]); break
-            except Exception as e: print('adjudicados: error', repr(e)[:200]); break
-        if push_fn is not None:
-            r0 = filas[0]; donde = ', '.join(x for x in (r0.get('centro'), r0.get('localidad')) if x)
-            carga = {'title': '🎉 Te han adjudicado una plaza', 'body': (donde or 'Revisa los detalles') + '. Toca para verla en DocentsCV.', 'url': '/', 'tag': f'adjudicado-{grupo}-{fecha}'}
-            subs = json.loads(psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from (select endpoint, p256dh, auth from push_suscripciones where user_id = {lit(uid)}) t", tuples=True).strip() or '[]')
+    if enviar_fn is None:
+        pem = psql("select valor from config where clave = 'vapid_privada'", tuples=True)
+        if pem.strip(): enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
+    txt = psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from eventos_continua_pendientes({lit(fecha)}, {lit(grupo)}) t", tuples=True).strip()
+    filas = json.loads(txt or '[]'); n = {'plaza': 0, 'vuelve': 0}; mails = 0
+    for r in filas:
+        titulo, corto, asunto, titular, parrafo = _txt_evento(r, fecha)
+        enviado = False
+        if enviar_fn:
+            subs = json.loads(psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from (select endpoint, p256dh, auth from push_suscripciones where user_id = {lit(r['user_id'])}) t", tuples=True).strip() or '[]')
+            carga = {'title': titulo, 'body': corto, 'url': '/', 'tag': f'evento-{r["tipo"]}-{grupo}-{fecha}'}
             for s in subs:
-                try: push_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); hecho = True
+                try: enviar_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); enviado = True
                 except Exception as e:
                     cod = getattr(getattr(e, 'response', None), 'status_code', None)
                     if cod in (404, 410): psql(f"delete from push_suscripciones where endpoint = {lit(s['endpoint'])}")
-                    else: print('adjudicados: error de notificación', cod, repr(e)[:120])
-        if hecho:
-            psql(f"insert into avisos_adjudicados(user_id, fecha, grupo) values ({lit(uid)}, {lit(fecha)}, {lit(grupo)}) on conflict do nothing"); enviados += 1
-    print(f'adjudicados ({grupo}): {enviados} persona(s) avisada(s), {max(len(por) - enviados, 0)} pendiente(s)')
-    return enviados
+                    else: print('eventos push: error', cod, repr(e)[:120])
+        if clave and r.get('quiere_email') and r.get('email') and mails < MAXIMO:
+            baja = f'{WEB}#baja={r["token"]}'
+            h = (f'<div style="font-family:Arial,sans-serif;font-size:15px;color:#1a2433;max-width:560px"><h2 style="margin:0 0 8px">{html.escape(titular)}</h2><p style="margin:0">{html.escape(parrafo)}</p>'
+                 f'<p style="margin:20px 0 6px"><a href="{WEB}" style="background:#0F7B8A;color:#fff;padding:10px 16px;border-radius:8px;text-decoration:none;display:inline-block">Abrir DocentsCV</a></p>'
+                 f'<p style="font-size:12px;color:#667;margin-top:24px">Recibes este aviso porque lo tienes activado en Mi apartado de DocentsCV. <a href="{baja}">Dejar de recibir avisos</a>.</p></div>')
+            t = f'{titular}\n\n{parrafo}\n\nAbrir DocentsCV: {WEB}\n\nPara dejar de recibir avisos: {baja}\n'
+            try: enviar_mail(clave, remitente, r['email'], asunto, h, t, baja); enviado = True; mails += 1
+            except urllib.error.HTTPError as e: print('eventos email: error de Brevo', e.code, e.read().decode()[:200])
+            except Exception as e: print('eventos email: error', repr(e)[:200])
+        if enviado:
+            psql(f"insert into avisos_evento(user_id, fecha, grupo, tipo) values ({lit(r['user_id'])}, {lit(fecha)}, {lit(grupo)}, {lit(r['tipo'])}) on conflict do nothing")
+            if r['tipo'] == 'vuelve':   # que no reciba además el aviso genérico «sigues sin plaza»
+                psql(f"insert into avisos_continua(user_id, fecha, grupo) values ({lit(r['user_id'])}, {lit(fecha)}, {lit(grupo)}) on conflict do nothing")
+            n[r['tipo']] += 1
+    print(f'eventos continua ({grupo}): {n["plaza"]} con plaza nueva, {n["vuelve"]} que vuelven a la bolsa, {mails} email(s)')
+    return n['plaza'] + n['vuelve']
