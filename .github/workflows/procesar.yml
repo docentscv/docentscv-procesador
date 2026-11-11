@@ -22,8 +22,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Instalar herramientas
+        timeout-minutes: 12
         run: |
-          command -v pdftotext >/dev/null && command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils postgresql-client; }
+          # Si los servidores de Ubuntu fallan un momento («Temporary failure resolving»), se reintenta hasta 4 veces
+          if command -v pdftotext >/dev/null && command -v psql >/dev/null; then exit 0; fi
+          for i in 1 2 3 4; do
+            if sudo apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
+               && sudo apt-get install -y -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=20 poppler-utils postgresql-client; then exit 0; fi
+            echo "Intento $i fallido; reintento en 30 s"; sleep 30
+          done
+          exit 1
       - name: Instalar librería de notificaciones
         run: pip install --quiet --break-system-packages pywebpush || pip install --quiet pywebpush
       - name: Buscar PDF nuevos en la web de la Conselleria
