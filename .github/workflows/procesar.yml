@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   procesar:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04      # fijado: «ubuntu-latest» pasó a Ubuntu 26.04 y falla al instalar herramientas
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
