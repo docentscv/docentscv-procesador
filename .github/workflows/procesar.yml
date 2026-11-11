@@ -24,14 +24,19 @@ jobs:
       - name: Instalar herramientas
         timeout-minutes: 12
         run: |
-          # Si los servidores de Ubuntu fallan un momento («Temporary failure resolving»), se reintenta hasta 4 veces
-          if command -v pdftotext >/dev/null && command -v psql >/dev/null; then exit 0; fi
-          for i in 1 2 3 4; do
-            if sudo apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
-               && sudo apt-get install -y -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=20 poppler-utils postgresql-client; then exit 0; fi
-            echo "Intento $i fallido; reintento en 30 s"; sleep 30
-          done
-          exit 1
+          # pdftotext (poppler) y psql. Si los servidores de Ubuntu no responden (fallo de GitHub), plan B: conda-forge.
+          if command -v pdftotext >/dev/null && command -v psql >/dev/null; then echo "Ya estaban instaladas"; exit 0; fi
+          if timeout 150 sudo apt-get update -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 \
+             && timeout 150 sudo apt-get install -y -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 poppler-utils postgresql-client; then
+            echo "Instaladas desde Ubuntu"; exit 0
+          fi
+          echo "::warning::Los servidores de Ubuntu no responden; instalo las herramientas desde conda-forge"
+          cd "$HOME"
+          curl -fsSL --retry 5 --retry-delay 5 https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj bin/micromamba
+          PKGS="poppler"; command -v psql >/dev/null || PKGS="$PKGS postgresql"
+          ./bin/micromamba create -y -q -r "$HOME/mamba" -p "$HOME/herr" -c conda-forge $PKGS
+          echo "$HOME/herr/bin" >> "$GITHUB_PATH"
+          "$HOME/herr/bin/pdftotext" -v 2>&1 | head -1
       - name: Instalar librería de notificaciones
         run: pip install --quiet --break-system-packages pywebpush || pip install --quiet pywebpush
       - name: Buscar PDF nuevos en la web de la Conselleria
