@@ -284,3 +284,130 @@ def avisar_eventos(psql, lit, fecha, grupo, enviar_mail=enviar, enviar_fn=None):
             n[r['tipo']] += 1
     print(f'eventos continua ({grupo}): {n["plaza"]} con plaza nueva, {n["vuelve"]} que vuelven a la bolsa, {mails} email(s)')
     return n['plaza'] + n['vuelve']
+
+
+# ---------- alertas por distancia: plazas de tus bolsas a menos de X km de tu domicilio ----------
+def avisar_dist(psql, lit, tipo, fecha, enviar_fn=None):
+    """Aviso push a quien ha pedido alertas por distancia (tipo: 'ofertas' o 'dificil'). Una vez por persona y publicación."""
+    if fecha < (datetime.date.today() - datetime.timedelta(days=1)).isoformat(): print('push distancia: publicación antigua, no se avisa'); return 0
+    remitente = os.environ.get('BREVO_SENDER', '').strip() or 'docentscv@gmail.com'
+    if enviar_fn is None:
+        pem = psql("select valor from config where clave = 'vapid_privada'", tuples=True)
+        if not pem.strip(): print('push distancia: aún no hay claves'); return 0
+        enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
+    txt = psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from push_dist_pendientes({lit(tipo)}, {lit(fecha)}) t", tuples=True).strip()
+    usuarios, quitar, ok = {}, [], 0
+    for r in json.loads(txt or '[]'): usuarios.setdefault(r['user_id'], []).append(r)
+    for uid, subs in usuarios.items():
+        r0 = subs[0]; n = r0['n']
+        que = 'ofertada' if tipo == 'ofertas' else 'de difícil cobertura'
+        cuerpo = (f'La más cercana, a unos {r0["km"]} km: {r0["cerca"]}.' if n > 1 else f'A unos {r0["km"]} km: {r0["cerca"]}.') + ' ¡No lo dejes pasar!'
+        carga = {'title': f'📍 {n} plaza{"s" if n != 1 else ""} {que}{"s" if n != 1 else ""} a menos de {r0["radio"]} km de casa'.replace('de difícil coberturas', 'de difícil cobertura'),
+                 'body': cuerpo, 'url': '/', 'tag': f'dist-{tipo}-{fecha}'}
+        enviado = False
+        for s in subs:
+            try: enviar_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); enviado = True
+            except Exception as e:
+                cod = getattr(getattr(e, 'response', None), 'status_code', None)
+                if cod in (404, 410): quitar.append(s['endpoint'])
+                else: print('push distancia: error', cod, repr(e)[:120])
+        if enviado:
+            psql(f"insert into dist_avisos(user_id, tipo, fecha) values ({lit(uid)}, {lit(tipo)}, {lit(fecha)}) on conflict do nothing"); ok += 1
+    for ep in quitar: psql(f"delete from push_suscripciones where endpoint = {lit(ep)}")
+    print(f'push distancia ({tipo}): {ok} usuario(s) avisado(s)')
+    return ok
+
+
+# ---------- favoritos: plazas adjudicadas en tus centros favoritos (adjudicación continua) ----------
+def avisar_fav_continua(psql, lit, fecha, grupo, enviar_fn=None):
+    """Push a quien tiene un centro favorito en el que se ha adjudicado una plaza de sus bolsas en esta continua."""
+    if fecha < (datetime.date.today() - datetime.timedelta(days=2)).isoformat(): print('push fav continua: lista antigua, no se avisa'); return 0
+    remitente = os.environ.get('BREVO_SENDER', '').strip() or 'docentscv@gmail.com'
+    if enviar_fn is None:
+        pem = psql("select valor from config where clave = 'vapid_privada'", tuples=True)
+        if not pem.strip(): print('push fav continua: aún no hay claves'); return 0
+        enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
+    txt = psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from push_fav_continua_pendientes({lit(fecha)}, {lit(grupo)}) t", tuples=True).strip()
+    usuarios, quitar, ok, tipo = {}, [], 0, f'continua_{grupo}'
+    for r in json.loads(txt or '[]'): usuarios.setdefault(r['user_id'], []).append(r)
+    for uid, subs in usuarios.items():
+        r0 = subs[0]; cen = r0['centros'] or []; n = r0['n']
+        donde = ', '.join(cen[:2]) + (f' y {len(cen) - 2} más' if len(cen) > 2 else '')
+        carga = {'title': f'⭐ Se ha{"n" if n != 1 else ""} adjudicado {n} plaza{"s" if n != 1 else ""} en tus centros favoritos',
+                 'body': f'{donde}. Llegó hasta el puesto {r0["pos_max"]} de la bolsa: mira en DocentsCV si ibas por delante.',
+                 'url': '/', 'tag': f'favc-{grupo}-{fecha}'}
+        enviado = False
+        for s in subs:
+            try: enviar_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); enviado = True
+            except Exception as e:
+                cod = getattr(getattr(e, 'response', None), 'status_code', None)
+                if cod in (404, 410): quitar.append(s['endpoint'])
+                else: print('push fav continua: error', cod, repr(e)[:120])
+        if enviado:
+            psql(f"insert into fav_avisos(user_id, tipo, fecha) values ({lit(uid)}, {lit(tipo)}, {lit(fecha)}) on conflict do nothing"); ok += 1
+    for ep in quitar: psql(f"delete from push_suscripciones where endpoint = {lit(ep)}")
+    print(f'push fav continua ({grupo}): {ok} usuario(s) avisado(s)')
+    return ok
+
+
+# ---------- resumen semanal (domingo por la tarde): push y/o email ----------
+def _lineas_resumen(r):
+    lin = []
+    for b in r.get('bolsas') or []:
+        nom = (b.get('bolsa') or '').strip().capitalize()
+        if b.get('estado') == 1: lin.append(f'{nom}: tienes plaza adjudicada 🎉'); continue
+        a, h = b.get('antes'), b.get('ahora')
+        if a and h and a != h: lin.append(f'{nom}: del puesto {a} al {h} ({"subes " + str(a - h) if h < a else "bajas " + str(h - a)})')
+        elif h: lin.append(f'{nom}: sigues en el puesto {h}')
+    n = r.get('ofertadas') or 0
+    if n: lin.append(f'{n} plaza{"s" if n != 1 else ""} ofertada{"s" if n != 1 else ""} esta semana en tus bolsas'
+                     + (f', {r["cerca"]} a menos de {r["radio"]} km de casa' if r.get('cerca') else ''))
+    return lin
+
+
+def resumen_semanal(psql, lit, hoy=None, enviar_mail=enviar, enviar_fn=None, forzar=False):
+    """Se ejecuta en cada pasada del procesador, pero solo actúa el domingo a partir de las 18:00 (hora de Madrid)
+    y una vez por persona y semana (tabla resumen_enviado)."""
+    try:
+        from zoneinfo import ZoneInfo
+        ahora = datetime.datetime.now(ZoneInfo('Europe/Madrid'))
+    except Exception:
+        ahora = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+    hoy = hoy or ahora.date()
+    if not forzar and (hoy.weekday() != 6 or ahora.hour < 18): return 0
+    lunes = hoy - datetime.timedelta(days=hoy.weekday())
+    clave = os.environ.get('BREVO_API_KEY', '').strip().strip('"\'')
+    remitente = os.environ.get('BREVO_SENDER', '').strip() or 'docentscv@gmail.com'
+    if enviar_fn is None:
+        pem = psql("select valor from config where clave = 'vapid_privada'", tuples=True)
+        if pem.strip(): enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
+    txt = psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from resumen_semanal_pendientes({lit(lunes.isoformat())}) t", tuples=True).strip()
+    filas = json.loads(txt or '[]'); ok = mails = 0
+    for r in filas:
+        lin = _lineas_resumen(r)
+        if not lin: continue
+        enviado = False
+        if enviar_fn and r.get('tiene_push'):
+            subs = json.loads(psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from (select endpoint, p256dh, auth from push_suscripciones where user_id = {lit(r['user_id'])}) t", tuples=True).strip() or '[]')
+            carga = {'title': '📊 Tu semana en las bolsas', 'body': ' · '.join(lin)[:230], 'url': '/', 'tag': f'resumen-{lunes}'}
+            for s in subs:
+                try: enviar_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); enviado = True
+                except Exception as e:
+                    cod = getattr(getattr(e, 'response', None), 'status_code', None)
+                    if cod in (404, 410): psql(f"delete from push_suscripciones where endpoint = {lit(s['endpoint'])}")
+                    else: print('resumen push: error', cod, repr(e)[:120])
+        if clave and r.get('quiere_email') and r.get('email') and mails < MAXIMO:
+            baja = f'{WEB}#baja={r["token"]}'
+            items = ''.join(f'<li style="margin:4px 0">{html.escape(x)}</li>' for x in lin)
+            h = (f'<div style="font-family:Arial,sans-serif;font-size:15px;color:#1a2433;max-width:560px"><h2 style="margin:0 0 8px">📊 Tu semana en las bolsas</h2>'
+                 f'<p style="margin:0 0 6px">Resumen del {fmt(lunes.isoformat())} al {fmt((lunes + datetime.timedelta(days=6)).isoformat())}:</p><ul style="padding-left:20px;margin:0">{items}</ul>'
+                 f'<p style="margin:20px 0 6px"><a href="{WEB}" style="background:#0F7B8A;color:#fff;padding:10px 16px;border-radius:8px;text-decoration:none;display:inline-block">Ver mi situación</a></p>'
+                 f'<p style="font-size:12px;color:#667;margin-top:24px">Las posiciones son las de las listas oficiales publicadas; la probabilidad de plaza es orientativa. Puedes desactivar el resumen semanal en Mi apartado → Ajustes. <a href="{baja}">Dejar de recibir avisos por email</a>.</p></div>')
+            t = 'Tu semana en las bolsas\n\n' + '\n'.join('- ' + x for x in lin) + f'\n\nVer mi situación: {WEB}\n\nDejar de recibir avisos por email: {baja}\n'
+            try: enviar_mail(clave, remitente, r['email'], '📊 Tu semana en las bolsas · DocentsCV', h, t, baja); enviado = True; mails += 1
+            except urllib.error.HTTPError as e: print('resumen email: error de Brevo', e.code, e.read().decode()[:200])
+            except Exception as e: print('resumen email: error', repr(e)[:200])
+        if enviado:
+            psql(f"insert into resumen_enviado(user_id, semana) values ({lit(r['user_id'])}, {lit(lunes.isoformat())}) on conflict do nothing"); ok += 1
+    print(f'resumen semanal: {ok} usuario(s), {mails} email(s)')
+    return ok
