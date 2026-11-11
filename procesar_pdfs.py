@@ -314,13 +314,20 @@ def main():
             except Exception as e: print('push: error', repr(e)[:300])
             try: avisos.avisar_fav(psql, lit, 'ofertas', f)
             except Exception as e: print('push fav: error', repr(e)[:300])
+            try: avisos.avisar_dist(psql, lit, 'ofertas', f)
+            except Exception as e: print('push distancia: error', repr(e)[:300])
         for f in sorted(set(fechas_dificil)):
             try: avisos.avisar_fav(psql, lit, 'dificil', f)
             except Exception as e: print('push fav: error', repr(e)[:300])
+            try: avisos.avisar_dist(psql, lit, 'dificil', f)
+            except Exception as e: print('push distancia: error', repr(e)[:300])
         for g in sorted(grupos_continua):
             try:
                 f = psql(f"select max(fecha) from instantaneas where tipo = 'continua' and grupo = {lit(g)}", tuples=True).strip()
-                if f: avisos.avisar_continua(psql, lit, f, g)
+                if f:
+                    try: avisos.avisar_eventos(psql, lit, f, g)
+                    except Exception as e: print('eventos continua: error', repr(e)[:300])
+                    avisos.avisar_continua(psql, lit, f, g)
             except Exception as e: print('push continua: error', repr(e)[:300])
         try: avisos.avisar_mensajes(psql, lit)
         except Exception as e: print('mensajes: error', repr(e)[:300])

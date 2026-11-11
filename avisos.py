@@ -228,3 +228,91 @@ def avisar_continua(psql, lit, fecha, grupo, enviar_fn=None):
     for ep in quitar: psql(f"delete from push_suscripciones where endpoint = {lit(ep)}")
     print(f'push continua ({grupo}): {ok} usuario(s) avisado(s)')
     return ok
+
+
+# ---------- avisos de adjudicación continua: «te han dado plaza» y «vuelves a estar en bolsa» ----------
+def _txt_evento(r, fecha):
+    """(titulo, cuerpo corto, asunto, titular del email, párrafo del email) según el tipo de aviso."""
+    if r['tipo'] == 'plaza':
+        donde = ' · '.join(x for x in [(r.get('centro') or '').strip(), (r.get('localidad') or '').strip().title()] if x)
+        esp = (r.get('especialidad') or '').strip()
+        corto = (donde + (f' · {esp}' if esp else '')) or f'Bolsa: {(r["bolsa"] or "")[:40]}'
+        return ('🎉 ¡Te han dado plaza!', corto + '. Mira los detalles en DocentsCV.',
+                f'🎉 Te han dado plaza · adjudicación continua del {fmt(fecha)}', '¡Te han dado plaza!',
+                f'En la adjudicación continua del {fmt(fecha)} figura una plaza para ti ({corto}). Compruébalo en DocentsCV y en la web de la Conselleria: lo que vale es la resolución oficial.')
+    return ('🔄 Vuelves a estar en bolsa', f'Ya no tienes plaza adjudicada y vuelves a la bolsa (nº {r["pos"]}). ¡No pierdas la oportunidad de conseguir nuevas plazas!',
+            f'🔄 Vuelves a estar en bolsa · adjudicación continua del {fmt(fecha)}', 'Vuelves a estar en bolsa',
+            f'En la adjudicación continua del {fmt(fecha)} ya no tienes plaza adjudicada y vuelves a estar disponible en la bolsa (nº {r["pos"]}). No pierdas la oportunidad de conseguir nuevas plazas: mira qué hay en DocentsCV.')
+
+
+def avisar_eventos(psql, lit, fecha, grupo, enviar_mail=enviar, enviar_fn=None):
+    """Dos avisos por email (si lo tiene activado) y por notificación (si la tiene activa), una sola vez por persona y lista:
+    'plaza' = te han adjudicado plaza; 'vuelve' = tenías plaza y vuelves a estar en bolsa sin ella."""
+    if fecha < (datetime.date.today() - datetime.timedelta(days=2)).isoformat(): print('eventos: lista antigua, no se avisa'); return 0
+    clave = os.environ.get('BREVO_API_KEY', '').strip().strip('"\'')
+    remitente = os.environ.get('BREVO_SENDER', '').strip() or 'docentscv@gmail.com'
+    if enviar_fn is None:
+        pem = psql("select valor from config where clave = 'vapid_privada'", tuples=True)
+        if pem.strip(): enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
+    txt = psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from eventos_continua_pendientes({lit(fecha)}, {lit(grupo)}) t", tuples=True).strip()
+    filas = json.loads(txt or '[]'); n = {'plaza': 0, 'vuelve': 0}; mails = 0
+    for r in filas:
+        titulo, corto, asunto, titular, parrafo = _txt_evento(r, fecha)
+        enviado = False
+        if enviar_fn:
+            subs = json.loads(psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from (select endpoint, p256dh, auth from push_suscripciones where user_id = {lit(r['user_id'])}) t", tuples=True).strip() or '[]')
+            carga = {'title': titulo, 'body': corto, 'url': '/', 'tag': f'evento-{r["tipo"]}-{grupo}-{fecha}'}
+            for s in subs:
+                try: enviar_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); enviado = True
+                except Exception as e:
+                    cod = getattr(getattr(e, 'response', None), 'status_code', None)
+                    if cod in (404, 410): psql(f"delete from push_suscripciones where endpoint = {lit(s['endpoint'])}")
+                    else: print('eventos push: error', cod, repr(e)[:120])
+        if clave and r.get('quiere_email') and r.get('email') and mails < MAXIMO:
+            baja = f'{WEB}#baja={r["token"]}'
+            h = (f'<div style="font-family:Arial,sans-serif;font-size:15px;color:#1a2433;max-width:560px"><h2 style="margin:0 0 8px">{html.escape(titular)}</h2><p style="margin:0">{html.escape(parrafo)}</p>'
+                 f'<p style="margin:20px 0 6px"><a href="{WEB}" style="background:#0F7B8A;color:#fff;padding:10px 16px;border-radius:8px;text-decoration:none;display:inline-block">Abrir DocentsCV</a></p>'
+                 f'<p style="font-size:12px;color:#667;margin-top:24px">Recibes este aviso porque lo tienes activado en Mi apartado de DocentsCV. <a href="{baja}">Dejar de recibir avisos</a>.</p></div>')
+            t = f'{titular}\n\n{parrafo}\n\nAbrir DocentsCV: {WEB}\n\nPara dejar de recibir avisos: {baja}\n'
+            try: enviar_mail(clave, remitente, r['email'], asunto, h, t, baja); enviado = True; mails += 1
+            except urllib.error.HTTPError as e: print('eventos email: error de Brevo', e.code, e.read().decode()[:200])
+            except Exception as e: print('eventos email: error', repr(e)[:200])
+        if enviado:
+            psql(f"insert into avisos_evento(user_id, fecha, grupo, tipo) values ({lit(r['user_id'])}, {lit(fecha)}, {lit(grupo)}, {lit(r['tipo'])}) on conflict do nothing")
+            if r['tipo'] == 'vuelve':   # que no reciba además el aviso genérico «sigues sin plaza»
+                psql(f"insert into avisos_continua(user_id, fecha, grupo) values ({lit(r['user_id'])}, {lit(fecha)}, {lit(grupo)}) on conflict do nothing")
+            n[r['tipo']] += 1
+    print(f'eventos continua ({grupo}): {n["plaza"]} con plaza nueva, {n["vuelve"]} que vuelven a la bolsa, {mails} email(s)')
+    return n['plaza'] + n['vuelve']
+
+
+# ---------- alertas por distancia: plazas de tus bolsas a menos de X km de tu domicilio ----------
+def avisar_dist(psql, lit, tipo, fecha, enviar_fn=None):
+    """Aviso push a quien ha pedido alertas por distancia (tipo: 'ofertas' o 'dificil'). Una vez por persona y publicación."""
+    if fecha < (datetime.date.today() - datetime.timedelta(days=1)).isoformat(): print('push distancia: publicación antigua, no se avisa'); return 0
+    remitente = os.environ.get('BREVO_SENDER', '').strip() or 'docentscv@gmail.com'
+    if enviar_fn is None:
+        pem = psql("select valor from config where clave = 'vapid_privada'", tuples=True)
+        if not pem.strip(): print('push distancia: aún no hay claves'); return 0
+        enviar_fn = lambda sub, carga: enviar_push(pem, sub, carga, remitente)
+    txt = psql(f"select coalesce(jsonb_agg(t), '[]'::jsonb) from push_dist_pendientes({lit(tipo)}, {lit(fecha)}) t", tuples=True).strip()
+    usuarios, quitar, ok = {}, [], 0
+    for r in json.loads(txt or '[]'): usuarios.setdefault(r['user_id'], []).append(r)
+    for uid, subs in usuarios.items():
+        r0 = subs[0]; n = r0['n']
+        que = 'ofertada' if tipo == 'ofertas' else 'de difícil cobertura'
+        cuerpo = (f'La más cercana, a unos {r0["km"]} km: {r0["cerca"]}.' if n > 1 else f'A unos {r0["km"]} km: {r0["cerca"]}.') + ' ¡No lo dejes pasar!'
+        carga = {'title': f'📍 {n} plaza{"s" if n != 1 else ""} {que}{"s" if n != 1 else ""} a menos de {r0["radio"]} km de casa'.replace('de difícil coberturas', 'de difícil cobertura'),
+                 'body': cuerpo, 'url': '/', 'tag': f'dist-{tipo}-{fecha}'}
+        enviado = False
+        for s in subs:
+            try: enviar_fn({'endpoint': s['endpoint'], 'keys': {'p256dh': s['p256dh'], 'auth': s['auth']}}, carga); enviado = True
+            except Exception as e:
+                cod = getattr(getattr(e, 'response', None), 'status_code', None)
+                if cod in (404, 410): quitar.append(s['endpoint'])
+                else: print('push distancia: error', cod, repr(e)[:120])
+        if enviado:
+            psql(f"insert into dist_avisos(user_id, tipo, fecha) values ({lit(uid)}, {lit(tipo)}, {lit(fecha)}) on conflict do nothing"); ok += 1
+    for ep in quitar: psql(f"delete from push_suscripciones where endpoint = {lit(ep)}")
+    print(f'push distancia ({tipo}): {ok} usuario(s) avisado(s)')
+    return ok
