@@ -327,12 +327,23 @@ def main():
                 if f:
                     try: avisos.avisar_eventos(psql, lit, f, g)
                     except Exception as e: print('eventos continua: error', repr(e)[:300])
+                    try: avisos.avisar_fav_continua(psql, lit, f, g)
+                    except Exception as e: print('push fav continua: error', repr(e)[:300])
                     avisos.avisar_continua(psql, lit, f, g)
             except Exception as e: print('push continua: error', repr(e)[:300])
         try: avisos.avisar_mensajes(psql, lit)
         except Exception as e: print('mensajes: error', repr(e)[:300])
+        if not a.local:
+            try: avisos.resumen_semanal(psql, lit)
+            except Exception as e: print('resumen semanal: error', repr(e)[:300])
         try: avisos.avisar_admin(psql, lit, resultados)
         except Exception as e: print('push admin: error', repr(e)[:300])
         if hecho_otros and not a.sin_tasas:
             d = os.path.join(tmp, 'tasas'); os.makedirs(d); print('tasas:', recalcular_tasas(d))
+        if not a.local:
+            try: avisos.vincular_pendientes(psql, lit)
+            except Exception as e: print('pendientes: error', repr(e)[:300])
+    if not a.local:
+        try: avisos.marcar_vivo(psql, lit)          # el vigilante avisa si esto deja de pasar durante horas
+        except Exception as e: print('marca de vida: error', repr(e)[:200])
 if __name__ == '__main__': main()
