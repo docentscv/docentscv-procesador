@@ -26,5 +26,11 @@ dos veces en el mismo PDF con niveles distintos (homónimo) o parece tener dos a
 espacio (fallo de extracción del propio PDF), no se adivina: se deja anotado en `idiomas_revisar` para
 repasarlo a mano.
 
+Algunos PDF (sobre todo los más recientes) no tienen la tabla como texto real, sino dibujada como líneas;
+en ese caso se lee por OCR (Tesseract, en español) y se carga igual, sin paso manual. El nombre leído por
+OCR se usa tal cual (si se equivoca en una letra, esa persona simplemente no coincide con nadie y no se
+carga: no se carga mal). El nivel (B2/C1/C2) solo se acepta si se lee exacto o con una corrección evidente
+de una sola letra; si queda ambiguo, también va a `idiomas_revisar` en vez de adivinarlo.
+
 Para probar con un PDF suelto sin tocar la web ni la base de datos:
 `python3 cargar_idiomas.py --local archivo.pdf --provincia València --fecha 2026-09-30`

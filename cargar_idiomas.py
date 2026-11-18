@@ -19,6 +19,13 @@ Seguridad:
   · Nunca adivina: un nombre que parece mal extraído del PDF (dos apellidos pegados) o
     que aparece dos veces en el mismo listado con niveles distintos (homónimo) se excluye
     y se deja anotado en `idiomas_revisar` para repasarlo a mano.
+  · Algunos PDF (sobre todo los más recientes) no tienen la tabla como texto real, sino
+    dibujada como líneas vectoriales; en ese caso se lee por OCR (Tesseract, a 300dpi). El
+    nombre se usa igual (si el OCR se equivoca en una letra, esa persona simplemente no
+    coincide con nadie y no se carga; no se carga mal). El nivel (B2/C1/C2), en cambio,
+    solo se acepta si se lee exacto o si hay una única corrección evidente a un carácter
+    de distancia; si el OCR del nivel es ambiguo, se manda igualmente a `idiomas_revisar`
+    en vez de adivinar.
   · Solo apunta la acreditación a personas que YA existen en la base (de alguna lista de
     bolsa); no crea personas nuevas solo por tener el idioma acreditado.
 
@@ -36,7 +43,11 @@ PROVINCIAS = {"València", "Castellón", "Alicante"}
 IDIOMA = 'Anglès'
 IDIOMA_RE = re.compile(r'angl|ingl', re.I)
 NIVEL_RE = re.compile(r'^(B2|C1|C2)$')
+NIVEL_LAXO_RE = re.compile(r'^[A-Z0-9]{2,3}$', re.I)  # candidato a nivel leído por OCR, a corregir después
+NIVELES = ('B2', 'C1', 'C2')
 TOL = 2.5             # tolerancia (puntos) para agrupar palabras en la misma fila de una tabla
+TOL_OCR = 9            # igual, pero para filas leídas por OCR (las cajas de palabra son menos precisas)
+OCR_DPI = 300          # resolución para el OCR; por debajo de esto empeora mucho el reconocimiento
 LARGO_SOSPECHOSO = 15  # una "palabra" de apellido más larga que esto probablemente son dos pegadas
 PAUSA = 0.4            # segundos entre peticiones, para no saturar la web de la Conselleria
 TR = str.maketrans('ÁÀÄÂÃÅÉÈËÊÍÌÏÎÓÒÖÔÕÚÙÜÛÑÇÝ', 'AAAAAAEEEEIIIIOOOOOUUUUNCY')
@@ -216,49 +227,141 @@ def descargar_pdf(url, destino):
 
 
 # ---------------------------------------------------------------- extracción del PDF (genérica) ----
-def filas_de_pagina(words):
+def filas_de_pagina(words, tol=TOL):
     """Agrupa las palabras de una página por fila (misma altura, con tolerancia), y dentro de
-    cada fila las deja ordenadas de izquierda a derecha (el orden de extracción de pdfplumber
-    puede no coincidir exactamente con el orden visual cuando dos columnas tienen una altura
-    ligeramente distinta dentro de la misma fila visual)."""
-    filas, cur, cur_top = [], [], None
+    cada fila las deja ordenadas de izquierda a derecha (el orden de extracción de pdfplumber,
+    o las cajas del OCR, pueden no coincidir exactamente con el orden visual cuando dos
+    columnas tienen una altura ligeramente distinta dentro de la misma fila visual). Compara
+    cada palabra con la media de la fila que se está formando (no solo con la primera), para
+    no perder la fila por el ruido de posición típico del OCR."""
+    filas, cur, suma_top, n = [], [], 0.0, 0
     for w in sorted(words, key=lambda w: (round(w['top']), w['x0'])):
-        if cur and abs(w['top'] - cur_top) > TOL:
+        if cur and abs(w['top'] - suma_top / n) > tol:
             filas.append(cur)
-            cur = []
+            cur, suma_top, n = [], 0.0, 0
         cur.append(w)
-        if len(cur) == 1:
-            cur_top = w['top']
+        suma_top += w['top']
+        n += 1
     if cur:
         filas.append(cur)
     return [sorted(f, key=lambda w: w['x0']) for f in filas]
 
 
+def _distancia(a, b):
+    """Distancia de Levenshtein entre dos cadenas cortas (sin dependencias externas)."""
+    if a == b:
+        return 0
+    fila = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        nueva = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            nueva[j] = min(fila[j] + 1, nueva[j - 1] + 1, fila[j - 1] + (ca != cb))
+        fila = nueva
+    return fila[-1]
+
+
+def corregir_nivel(crudo):
+    """Intenta reconocer un nivel (B2/C1/C2) leído por OCR con ruido ('Ct', 'c1', 'Cc'...).
+    Solo "corrige" cuando hay UN único candidato a una letra de distancia; si hay empate
+    (p.ej. 'Cc', igual de parecido a C1 y a C2) o la distancia es mayor, no adivina:
+    devuelve None y la fila se manda a revisar a mano en vez de cargarse con un nivel que
+    podría estar mal."""
+    t = re.sub(r'[^A-Z0-9]', '', crudo.upper())
+    if t in NIVELES:
+        return t
+    candidatos = [niv for niv in NIVELES if _distancia(t, niv) <= 1]
+    return candidatos[0] if len(candidatos) == 1 else None
+
+
+def _palabras_ocr(page):
+    """OCR de una página sin texto extraíble (escaneada, o con la tabla dibujada como
+    curvas vectoriales en vez de texto real -visto en algún PDF de la Conselleria-).
+    Devuelve las palabras en el mismo formato que extract_words() (text/x0/top), para
+    poder reutilizar filas_de_pagina(). Prueba primero el modelo de español; si no está
+    instalado (p.ej. en pruebas locales sin red), usa el de inglés como alternativa: los
+    niveles B2/C1/C2 se leen igual de bien con cualquiera de los dos."""
+    import pytesseract
+    imagen = page.to_image(resolution=OCR_DPI).original
+    try:
+        datos = pytesseract.image_to_data(imagen, lang='spa', output_type=pytesseract.Output.DICT)
+    except Exception:
+        datos = pytesseract.image_to_data(imagen, lang='eng', output_type=pytesseract.Output.DICT)
+    return [
+        {'text': datos['text'][i].strip(), 'x0': float(datos['left'][i]), 'top': float(datos['top'][i])}
+        for i in range(len(datos['text'])) if datos['text'][i].strip()
+    ]
+
+
+def fila_valida(textos, ocr):
+    """Si la fila tiene pinta de ser una fila de 'inglés' (nombre + Idioma + Nivel), devuelve
+    (nombre, nivel, duda): duda es None si el nivel se reconoce con seguridad, o un texto
+    explicando la duda si viene de OCR y el nivel no se puede asegurar. Si la fila no tiene
+    columna de idioma reconocible, devuelve None (no es una fila de inglés: cabecera, pie,
+    otro idioma, o el Anexo de excluidos). Para texto extraído directamente del PDF (ocr=False)
+    exige un nivel exacto, como siempre; el margen para corregir ruido de reconocimiento solo
+    se aplica a filas que vienen de OCR."""
+    idx_idioma = [i for i, t in enumerate(textos) if IDIOMA_RE.search(t)]
+    if not idx_idioma:
+        return None
+    primero = min(idx_idioma)
+    nombre_tokens = textos[:primero]
+    if not nombre_tokens:
+        return None
+    resto = textos[primero + 1:]
+    exactos = [t for t in resto if NIVEL_RE.match(t)]
+    if exactos:
+        return ' '.join(nombre_tokens), exactos[0], None
+    if not ocr:
+        return None
+    for crudo in resto:
+        if not NIVEL_LAXO_RE.match(crudo):
+            continue
+        corregido = corregir_nivel(crudo)
+        if corregido:
+            return ' '.join(nombre_tokens), corregido, None
+        return ' '.join(nombre_tokens), crudo, f'nivel no reconocido con confianza por OCR (leído: "{crudo}")'
+    return None
+
+
 def extraer_ingles(ruta):
-    """-> (filas[(nombre, nivel)], páginas totales, páginas con texto extraíble).
+    """-> (filas[(nombre, nivel)], ambiguas[(nombre, nivel_crudo, motivo)], páginas totales,
+    páginas con texto, páginas leídas por OCR).
     No asume columnas fijas: en cada fila busca un nivel (B2/C1/C2) junto a una palabra de
     idioma (anglès/inglés); todo lo que hay en la fila ANTES de esa palabra es el nombre.
     Así ignora automáticamente las filas de otros idiomas y las del Anexo de excluidos
-    (que no tienen columna de nivel)."""
+    (que no tienen columna de nivel). Si una página no tiene texto extraíble, se lee por OCR
+    en vez de dejarla en blanco (ver _palabras_ocr); las filas de OCR con el nivel ambiguo
+    van a `ambiguas`, nunca se adivinan."""
     import pdfplumber
-    out, paginas_con_texto = [], 0
+    filas, ambiguas = [], []
+    paginas_con_texto = paginas_ocr = 0
     with pdfplumber.open(ruta) as pdf:
         total = len(pdf.pages)
         for page in pdf.pages:
             words = page.extract_words()
-            if words:
-                paginas_con_texto += 1
-            for fila in filas_de_pagina(words):
-                textos = [w['text'] for w in fila]
-                idx_idioma = [i for i, t in enumerate(textos) if IDIOMA_RE.search(t)]
-                idx_nivel = [i for i, t in enumerate(textos) if NIVEL_RE.match(t)]
-                if not idx_idioma or not idx_nivel:
+            ocr = False
+            if not words:
+                try:
+                    words = _palabras_ocr(page)
+                    ocr = bool(words)
+                except Exception as e:
+                    print('  (aviso: no se pudo hacer OCR de una página:', repr(e)[:150], ')')
+                    words = []
+            if not words:
+                continue
+            paginas_con_texto += 1
+            if ocr:
+                paginas_ocr += 1
+            for fila in filas_de_pagina(words, TOL_OCR if ocr else TOL):
+                r = fila_valida([w['text'] for w in fila], ocr)
+                if not r:
                     continue
-                nombre_tokens = textos[:min(idx_idioma)]
-                if not nombre_tokens:
-                    continue
-                out.append((' '.join(nombre_tokens), textos[idx_nivel[0]]))
-    return out, total, paginas_con_texto
+                nombre, nivel, duda = r
+                if duda:
+                    ambiguas.append((nombre, nivel, duda))
+                else:
+                    filas.append((nombre, nivel))
+    return filas, ambiguas, total, paginas_con_texto, paginas_ocr
 
 
 def clasificar(filas):
@@ -300,17 +403,18 @@ commit;
 
 # ---------------------------------------------------------------- flujo principal ----
 def procesar_pdf(ruta, provincia, fecha, fuente_url, real):
-    filas, total_pag, pag_con_texto = extraer_ingles(ruta)
+    filas, ambiguas, total_pag, pag_con_texto, pag_ocr = extraer_ingles(ruta)
     if pag_con_texto == 0:
-        raise Fallo('el PDF no tiene texto extraíble (¿escaneado?); necesita revisión manual')
+        raise Fallo('el PDF no tiene texto extraíble ni se ha podido leer por OCR; necesita revisión manual')
     cargables, homonimos, sospechosas = clasificar(filas)
-    if not filas:
+    if not filas and not ambiguas:
         raise Fallo(f'no se ha encontrado ninguna fila de inglés (B2/C1/C2) en {total_pag} página(s); revisar a mano')
     revisar = [(n, nv, 'homónimo: mismo nombre y distinto nivel en este listado') for n, nv in homonimos]
     revisar += [(n, nv, 'nombre sospechoso (posibles dos apellidos pegados en el PDF de origen)') for n, nv in sospechosas]
+    revisar += ambiguas
     if real:
         cargar_en_bd(cargables, fecha, provincia, fuente_url, revisar)
-    return len(cargables), len(homonimos), len(sospechosas)
+    return len(cargables), len(homonimos), len(sospechosas), len(ambiguas), pag_ocr
 
 
 def main():
@@ -328,8 +432,9 @@ def main():
             raise SystemExit('No se pudo deducir la fecha del nombre del archivo; indícala con --fecha AAAA-MM-DD')
         if real:
             asegurar_esquema()
-        n, h, s = procesar_pdf(a.local, a.provincia, fecha, 'local:' + a.local, real)
-        print(f'{n} cargables, {h} homónimos excluidos, {s} sospechosos excluidos (de {n + h + s} filas de inglés)')
+        n, h, s, a_, o = procesar_pdf(a.local, a.provincia, fecha, 'local:' + a.local, real)
+        print(f'{n} cargables, {h} homónimos excluidos, {s} sospechosos excluidos, {a_} ambiguos de OCR excluidos '
+              f'(de {n + h + s + a_} filas de inglés; {o} página(s) leídas por OCR)')
         return
 
     if real:
@@ -361,8 +466,10 @@ def main():
             ruta = os.path.join(tmp, re.sub(r'[^\w.\-]', '_', nombre))
             try:
                 peso = descargar_pdf(url_pdf, ruta)
-                n, h, s = procesar_pdf(ruta, provincia, fecha, url_pdf, real)
-                print(f'  [{provincia} {curso}] {nombre} ({peso // 1024} KB): {n} cargables, {h} homónimos, {s} sospechosos')
+                n, h, s, a_, o = procesar_pdf(ruta, provincia, fecha, url_pdf, real)
+                ocr_txt = f', {o} pág. por OCR' if o else ''
+                print(f'  [{provincia} {curso}] {nombre} ({peso // 1024} KB): {n} cargables, {h} homónimos, '
+                      f'{s} sospechosos, {a_} ambiguos de OCR{ocr_txt}')
                 nuevos += 1; personas_nuevas += n
                 if real:
                     psql(f"insert into fuentes_idioma (url, provincia, curso, nombre_archivo, fecha, estado, personas) "

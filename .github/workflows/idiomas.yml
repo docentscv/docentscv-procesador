@@ -24,6 +24,11 @@ jobs:
           timeout 150 sudo apt-get install -y -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 postgresql-client
       - name: Instalar pdfplumber
         run: pip install --quiet --break-system-packages pdfplumber || pip install --quiet pdfplumber
+      - name: Instalar Tesseract (OCR, para los PDF sin texto real)
+        run: |
+          timeout 150 sudo apt-get update -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15
+          timeout 150 sudo apt-get install -y -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 tesseract-ocr tesseract-ocr-spa
+          pip install --quiet --break-system-packages pytesseract || pip install --quiet pytesseract
       - name: Buscar y cargar acreditaciones de inglés
         run: python3 cargar_idiomas.py
         env:
