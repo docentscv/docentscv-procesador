@@ -191,7 +191,7 @@ def listar_pdfs(url_carpeta):
     return out
 
 
-NOMBRE_FECHA_RE = re.compile(r'^(\d{4})_(\d{2})_(\d{2})\.pdf$', re.I)
+NOMBRE_FECHA_RE = re.compile(r'^(\d{4})[_-](\d{2})[_-](\d{2})\.pdf$', re.I)
 
 
 def fecha_de_nombre(nombre):
