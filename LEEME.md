@@ -11,3 +11,20 @@ Secretos necesarios en GitHub (Settings → Secrets and variables → Actions):
 - DATABASE_URL: cadena de conexión «Session pooler» de Supabase (con tu contraseña de base de datos)
 - SUPABASE_URL: https://gwoamxgvnhietzhixjlf.supabase.co
 - SUPABASE_SERVICE_KEY: clave secreta (sb_secret_...) de Supabase. NUNCA en la web ni en el código.
+
+## Acreditación de idiomas (inglés)
+
+Cada lunes (y también a mano, pestaña Actions → «Acreditación de idiomas (inglés)» → Run workflow)
+`cargar_idiomas.py` recorre en la web de la Conselleria los «Listados definitivos» de Acreditación en
+lenguas extranjeras de las 3 direcciones territoriales (València, Castellón, Alicante) y todos los
+cursos. Descarga cada PDF nuevo, saca de la tabla «Anexo I» quién tiene el inglés acreditado (B2/C1/C2)
+y lo guarda en `acreditaciones_idioma`, para que la web le muestre esa observación a cada docente. Solo
+apunta la acreditación a personas que ya existan en alguna lista de bolsa (no crea personas nuevas).
+
+Cada PDF ya tratado se apunta en `fuentes_idioma` (por su URL) y no se vuelve a bajar. Si un nombre sale
+dos veces en el mismo PDF con niveles distintos (homónimo) o parece tener dos apellidos pegados sin
+espacio (fallo de extracción del propio PDF), no se adivina: se deja anotado en `idiomas_revisar` para
+repasarlo a mano.
+
+Para probar con un PDF suelto sin tocar la web ni la base de datos:
+`python3 cargar_idiomas.py --local archivo.pdf --provincia València --fecha 2026-09-30`
