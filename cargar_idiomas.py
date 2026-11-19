@@ -19,6 +19,13 @@ Seguridad:
   · Nunca adivina: un nombre que parece mal extraído del PDF (dos apellidos pegados) o
     que aparece dos veces en el mismo listado con niveles distintos (homónimo) se excluye
     y se deja anotado en `idiomas_revisar` para repasarlo a mano.
+  · Algunos PDF (sobre todo los más recientes) no tienen la tabla como texto real, sino
+    dibujada como líneas vectoriales; en ese caso se lee por OCR (Tesseract, a 300dpi). El
+    nombre se usa igual (si el OCR se equivoca en una letra, esa persona simplemente no
+    coincide con nadie y no se carga; no se carga mal). El nivel (B2/C1/C2), en cambio,
+    solo se acepta si se lee exacto o si hay una única corrección evidente a un carácter
+    de distancia; si el OCR del nivel es ambiguo, se manda igualmente a `idiomas_revisar`
+    en vez de adivinar.
   · Solo apunta la acreditación a personas que YA existen en la base (de alguna lista de
     bolsa); no crea personas nuevas solo por tener el idioma acreditado.
 
@@ -36,7 +43,10 @@ PROVINCIAS = {"València", "Castellón", "Alicante"}
 IDIOMA = 'Anglès'
 IDIOMA_RE = re.compile(r'angl|ingl', re.I)
 NIVEL_RE = re.compile(r'^(B2|C1|C2)$')
+NIVELES = ('B2', 'C1', 'C2')
 TOL = 2.5             # tolerancia (puntos) para agrupar palabras en la misma fila de una tabla
+TOL_OCR = 9            # igual, pero para filas leídas por OCR (las cajas de palabra son menos precisas)
+OCR_DPI = 300          # resolución para el OCR; por debajo de esto empeora mucho el reconocimiento
 LARGO_SOSPECHOSO = 15  # una "palabra" de apellido más larga que esto probablemente son dos pegadas
 PAUSA = 0.4            # segundos entre peticiones, para no saturar la web de la Conselleria
 TR = str.maketrans('ÁÀÄÂÃÅÉÈËÊÍÌÏÎÓÒÖÔÕÚÙÜÛÑÇÝ', 'AAAAAAEEEEIIIIOOOOOUUUUNCY')
@@ -216,49 +226,238 @@ def descargar_pdf(url, destino):
 
 
 # ---------------------------------------------------------------- extracción del PDF (genérica) ----
-def filas_de_pagina(words):
+def filas_de_pagina(words, tol=TOL):
     """Agrupa las palabras de una página por fila (misma altura, con tolerancia), y dentro de
-    cada fila las deja ordenadas de izquierda a derecha (el orden de extracción de pdfplumber
-    puede no coincidir exactamente con el orden visual cuando dos columnas tienen una altura
-    ligeramente distinta dentro de la misma fila visual)."""
-    filas, cur, cur_top = [], [], None
+    cada fila las deja ordenadas de izquierda a derecha (el orden de extracción de pdfplumber,
+    o las cajas del OCR, pueden no coincidir exactamente con el orden visual cuando dos
+    columnas tienen una altura ligeramente distinta dentro de la misma fila visual). Compara
+    cada palabra con la media de la fila que se está formando (no solo con la primera), para
+    no perder la fila por el ruido de posición típico del OCR."""
+    filas, cur, suma_top, n = [], [], 0.0, 0
     for w in sorted(words, key=lambda w: (round(w['top']), w['x0'])):
-        if cur and abs(w['top'] - cur_top) > TOL:
+        if cur and abs(w['top'] - suma_top / n) > tol:
             filas.append(cur)
-            cur = []
+            cur, suma_top, n = [], 0.0, 0
         cur.append(w)
-        if len(cur) == 1:
-            cur_top = w['top']
+        suma_top += w['top']
+        n += 1
     if cur:
         filas.append(cur)
     return [sorted(f, key=lambda w: w['x0']) for f in filas]
 
 
+def _distancia(a, b):
+    """Distancia de Levenshtein entre dos cadenas cortas (sin dependencias externas)."""
+    if a == b:
+        return 0
+    fila = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        nueva = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            nueva[j] = min(fila[j] + 1, nueva[j - 1] + 1, fila[j - 1] + (ca != cb))
+        fila = nueva
+    return fila[-1]
+
+
+def candidatos_nivel(crudo):
+    """Candidatos de nivel (B2/C1/C2) a los que se parece un texto corto leído por OCR, a
+    lo sumo a una letra de distancia (p.ej. 'Ct'->C1, 'c1'->C1, 'e2'->B2: la OCR a veces
+    confunde la primera letra). Quita antes el ruido típico de las líneas de una tabla
+    (corchetes, barras) pegado al texto. Lista vacía: no se parece a ningún nivel, no es
+    una celda de nivel (p.ej. una palabra suelta cualquiera) y hay que ignorarla sin más.
+    Un único candidato: se puede corregir con seguridad. Más de uno (p.ej. 'Cc', igual de
+    parecido a C1 y a C2): empate genuino, no se adivina, se manda a revisar a mano."""
+    t = re.sub(r'[^A-Z0-9]', '', crudo.upper())
+    if len(t) != 2:
+        return []
+    if t in NIVELES:
+        return [t]
+    return [niv for niv in NIVELES if _distancia(t, niv) <= 1]
+
+
+def _palabras_ocr(page):
+    """OCR de una página sin texto extraíble (escaneada, o con la tabla dibujada como
+    curvas vectoriales en vez de texto real -visto en algún PDF de la Conselleria-).
+    Devuelve las palabras en el mismo formato que extract_words() (text/x0/top), para
+    poder reutilizar filas_de_pagina(). Prueba primero el modelo de español; si no está
+    instalado (p.ej. en pruebas locales sin red), usa el de inglés como alternativa: los
+    niveles B2/C1/C2 se leen igual de bien con cualquiera de los dos."""
+    import pytesseract
+    imagen = page.to_image(resolution=OCR_DPI).original
+    try:
+        datos = pytesseract.image_to_data(imagen, lang='spa', output_type=pytesseract.Output.DICT)
+    except Exception:
+        datos = pytesseract.image_to_data(imagen, lang='eng', output_type=pytesseract.Output.DICT)
+    return [
+        {'text': datos['text'][i].strip(), 'x0': float(datos['left'][i]),
+         'x1': float(datos['left'][i] + datos['width'][i]), 'top': float(datos['top'][i])}
+        for i in range(len(datos['text'])) if datos['text'][i].strip()
+    ]
+
+
+def fila_valida(textos, ocr):
+    """Si la fila tiene pinta de ser una fila de 'inglés' (nombre + Idioma + Nivel), devuelve
+    (nombre, nivel, duda): duda es None si el nivel se reconoce con seguridad, o un texto
+    explicando la duda si viene de OCR y el nivel no se puede asegurar. Si la fila no tiene
+    columna de idioma reconocible, devuelve None (no es una fila de inglés: cabecera, pie,
+    otro idioma, o el Anexo de excluidos). Para texto extraído directamente del PDF (ocr=False)
+    exige un nivel exacto, como siempre; el margen para corregir ruido de reconocimiento solo
+    se aplica a filas que vienen de OCR."""
+    idx_idioma = [i for i, t in enumerate(textos) if IDIOMA_RE.search(t)]
+    if not idx_idioma:
+        return None
+    primero = min(idx_idioma)
+    nombre_tokens = textos[:primero]
+    if not nombre_tokens:
+        return None
+    resto = textos[primero + 1:]
+    exactos = [t for t in resto if NIVEL_RE.match(t)]
+    if exactos:
+        return ' '.join(nombre_tokens), exactos[0], None
+    if not ocr:
+        return None
+    for crudo in resto:
+        candidatos = candidatos_nivel(crudo)
+        if not candidatos:
+            continue
+        if len(candidatos) == 1:
+            return ' '.join(nombre_tokens), candidatos[0], None
+        return ' '.join(nombre_tokens), crudo, f'nivel no reconocido con confianza por OCR (leído: "{crudo}")'
+    return None
+
+
+# -- formato "ancho": algunos listados antiguos no ponen una fila por idioma con la palabra
+# "Anglès"/"Inglés" al lado, sino una columna por idioma (Ang/Fra/Ale/Ita) y el nivel metido
+# en la columna que toque; aquí no hay ninguna palabra de idioma en la fila de cada persona,
+# así que fila_valida() nunca encuentra nada y hay que localizar la columna por su posición.
+REL_JUR_RE = re.compile(r'^(FI|FC|FP)$')
+_PATRONES_CABECERA_ANCHA = {
+    'ang': re.compile(r'^(ang|angl|ingl)', re.I),
+    'fra': re.compile(r'^(fra|franc)', re.I),
+    'ale': re.compile(r'^(ale|alem)', re.I),
+    'ita': re.compile(r'^(ita|ital)', re.I),
+}
+
+
+def _col_idioma_ancho(filas):
+    """Busca, entre las filas de una página, la fila de cabecera del formato "ancho" (las
+    columnas Ang/Fra/Ale/Ita juntas en la misma fila). Quita primero el ruido típico del OCR
+    con tablas (corchetes y barras de las líneas de la rejilla pegadas a la palabra, p.ej.
+    "[Ang]"). Exige encontrar "Ang" y al menos otras dos de las tres restantes (en un PDF
+    escaneado de mala calidad alguna puede salir ilegible, como "Ita" partida en dos) para
+    no confundir una fila cualquiera con la cabecera. Si la encuentra, devuelve ((x0, x1)
+    de la columna de inglés, la fila de cabecera en sí); si no, (None, None)."""
+    for fila in filas:
+        hallados = {}
+        for w in fila:
+            limpio = w['text'].strip('[]{}|_').strip()
+            if not limpio or len(limpio) > 8:
+                continue
+            for clave, patron in _PATRONES_CABECERA_ANCHA.items():
+                if clave not in hallados and patron.match(limpio):
+                    hallados[clave] = (w['x0'], w['x1'])
+        if 'ang' in hallados and len(hallados) >= 3:
+            return hallados['ang'], fila
+    return None, None
+
+
+def filas_formato_ancho(filas, fila_cabecera, col_ang, ocr):
+    """Para el formato "ancho": el nombre es todo lo que hay antes del código de relación
+    jurídica (FI/FC/FP) o de la letra suelta de la columna "Cos" (M/P); el nivel es
+    cualquier B2/C1/C2 (o, en OCR, un valor parecido que se pueda corregir con seguridad)
+    cuyo x0 caiga dentro de la columna de inglés detectada en la cabecera."""
+    x0_ang, x1_ang = col_ang
+    margen = 15 if ocr else 6
+    buenas, ambiguas = [], []
+    for fila in filas:
+        if fila is fila_cabecera:
+            continue
+        fila = sorted(fila, key=lambda w: w['x0'])
+        nombre_tokens = []
+        for w in fila:
+            if REL_JUR_RE.match(w['text']) or (len(w['text']) == 1 and w['text'].isalpha()):
+                break
+            nombre_tokens.append(w['text'])
+        if not nombre_tokens:
+            continue
+        for w in fila:
+            if not (x0_ang - margen <= w['x0'] <= x1_ang + margen):
+                continue
+            limpio = w['text'].strip('[]{}|_').strip()
+            if NIVEL_RE.match(limpio):
+                buenas.append((' '.join(nombre_tokens), limpio))
+                break
+            if not ocr:
+                continue
+            candidatos = candidatos_nivel(limpio)
+            if len(candidatos) == 1:
+                buenas.append((' '.join(nombre_tokens), candidatos[0]))
+                break
+            if len(candidatos) > 1:
+                ambiguas.append((' '.join(nombre_tokens), limpio,
+                                  f'nivel no reconocido con confianza por OCR (leído: "{limpio}")'))
+                break
+    return buenas, ambiguas
+
+
 def extraer_ingles(ruta):
-    """-> (filas[(nombre, nivel)], páginas totales, páginas con texto extraíble).
-    No asume columnas fijas: en cada fila busca un nivel (B2/C1/C2) junto a una palabra de
-    idioma (anglès/inglés); todo lo que hay en la fila ANTES de esa palabra es el nombre.
-    Así ignora automáticamente las filas de otros idiomas y las del Anexo de excluidos
-    (que no tienen columna de nivel)."""
+    """-> (filas[(nombre, nivel)], ambiguas[(nombre, nivel_crudo, motivo)], páginas totales,
+    páginas con texto, páginas leídas por OCR).
+    Reconoce dos formatos de tabla: el habitual (una fila por idioma, con la palabra
+    "Anglès"/"Inglés" al lado del nivel: ver fila_valida) y uno "ancho" usado en algunos
+    listados antiguos (una columna por idioma: Ang/Fra/Ale/Ita, con el nivel metido en la
+    columna que toque: ver filas_formato_ancho). No asume columnas fijas en el primer
+    formato: todo lo que hay en la fila ANTES de la palabra de idioma es el nombre, así que
+    ignora automáticamente las filas de otros idiomas y las del Anexo de excluidos. Si una
+    página no tiene texto extraíble, se lee por OCR en vez de dejarla en blanco (ver
+    _palabras_ocr); las filas de OCR con el nivel ambiguo van a `ambiguas`, nunca se
+    adivinan, en ninguno de los dos formatos."""
     import pdfplumber
-    out, paginas_con_texto = [], 0
+    paginas = []  # [(ocr, filas_de_la_pagina)]
+    paginas_con_texto = paginas_ocr = 0
     with pdfplumber.open(ruta) as pdf:
         total = len(pdf.pages)
         for page in pdf.pages:
             words = page.extract_words()
-            if words:
-                paginas_con_texto += 1
-            for fila in filas_de_pagina(words):
-                textos = [w['text'] for w in fila]
-                idx_idioma = [i for i, t in enumerate(textos) if IDIOMA_RE.search(t)]
-                idx_nivel = [i for i, t in enumerate(textos) if NIVEL_RE.match(t)]
-                if not idx_idioma or not idx_nivel:
-                    continue
-                nombre_tokens = textos[:min(idx_idioma)]
-                if not nombre_tokens:
-                    continue
-                out.append((' '.join(nombre_tokens), textos[idx_nivel[0]]))
-    return out, total, paginas_con_texto
+            ocr = False
+            if not words:
+                try:
+                    words = _palabras_ocr(page)
+                    ocr = bool(words)
+                except Exception as e:
+                    print('  (aviso: no se pudo hacer OCR de una página:', repr(e)[:150], ')')
+                    words = []
+            if not words:
+                continue
+            paginas_con_texto += 1
+            if ocr:
+                paginas_ocr += 1
+            paginas.append((ocr, filas_de_pagina(words, TOL_OCR if ocr else TOL)))
+
+    col_ang = fila_cabecera = None
+    for _, filas in paginas:
+        col_ang, fila_cabecera = _col_idioma_ancho(filas)
+        if col_ang:
+            break
+
+    filas_out, ambiguas = [], []
+    for ocr, filas in paginas:
+        for fila in filas:
+            if fila is fila_cabecera:
+                continue
+            r = fila_valida([w['text'] for w in fila], ocr)
+            if not r:
+                continue
+            nombre, nivel, duda = r
+            if duda:
+                ambiguas.append((nombre, nivel, duda))
+            else:
+                filas_out.append((nombre, nivel))
+        if col_ang:
+            extra, extra_amb = filas_formato_ancho(filas, fila_cabecera, col_ang, ocr)
+            filas_out += extra
+            ambiguas += extra_amb
+    return filas_out, ambiguas, total, paginas_con_texto, paginas_ocr
 
 
 def clasificar(filas):
@@ -300,17 +499,18 @@ commit;
 
 # ---------------------------------------------------------------- flujo principal ----
 def procesar_pdf(ruta, provincia, fecha, fuente_url, real):
-    filas, total_pag, pag_con_texto = extraer_ingles(ruta)
+    filas, ambiguas, total_pag, pag_con_texto, pag_ocr = extraer_ingles(ruta)
     if pag_con_texto == 0:
-        raise Fallo('el PDF no tiene texto extraíble (¿escaneado?); necesita revisión manual')
+        raise Fallo('el PDF no tiene texto extraíble ni se ha podido leer por OCR; necesita revisión manual')
     cargables, homonimos, sospechosas = clasificar(filas)
-    if not filas:
+    if not filas and not ambiguas:
         raise Fallo(f'no se ha encontrado ninguna fila de inglés (B2/C1/C2) en {total_pag} página(s); revisar a mano')
     revisar = [(n, nv, 'homónimo: mismo nombre y distinto nivel en este listado') for n, nv in homonimos]
     revisar += [(n, nv, 'nombre sospechoso (posibles dos apellidos pegados en el PDF de origen)') for n, nv in sospechosas]
+    revisar += ambiguas
     if real:
         cargar_en_bd(cargables, fecha, provincia, fuente_url, revisar)
-    return len(cargables), len(homonimos), len(sospechosas)
+    return len(cargables), len(homonimos), len(sospechosas), len(ambiguas), pag_ocr
 
 
 def main():
@@ -328,8 +528,9 @@ def main():
             raise SystemExit('No se pudo deducir la fecha del nombre del archivo; indícala con --fecha AAAA-MM-DD')
         if real:
             asegurar_esquema()
-        n, h, s = procesar_pdf(a.local, a.provincia, fecha, 'local:' + a.local, real)
-        print(f'{n} cargables, {h} homónimos excluidos, {s} sospechosos excluidos (de {n + h + s} filas de inglés)')
+        n, h, s, a_, o = procesar_pdf(a.local, a.provincia, fecha, 'local:' + a.local, real)
+        print(f'{n} cargables, {h} homónimos excluidos, {s} sospechosos excluidos, {a_} ambiguos de OCR excluidos '
+              f'(de {n + h + s + a_} filas de inglés; {o} página(s) leídas por OCR)')
         return
 
     if real:
@@ -361,8 +562,10 @@ def main():
             ruta = os.path.join(tmp, re.sub(r'[^\w.\-]', '_', nombre))
             try:
                 peso = descargar_pdf(url_pdf, ruta)
-                n, h, s = procesar_pdf(ruta, provincia, fecha, url_pdf, real)
-                print(f'  [{provincia} {curso}] {nombre} ({peso // 1024} KB): {n} cargables, {h} homónimos, {s} sospechosos')
+                n, h, s, a_, o = procesar_pdf(ruta, provincia, fecha, url_pdf, real)
+                ocr_txt = f', {o} pág. por OCR' if o else ''
+                print(f'  [{provincia} {curso}] {nombre} ({peso // 1024} KB): {n} cargables, {h} homónimos, '
+                      f'{s} sospechosos, {a_} ambiguos de OCR{ocr_txt}')
                 nuevos += 1; personas_nuevas += n
                 if real:
                     psql(f"insert into fuentes_idioma (url, provincia, curso, nombre_archivo, fecha, estado, personas) "
