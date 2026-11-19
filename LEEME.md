@@ -42,3 +42,14 @@ de revisión manual — no es un fallo del robot, es la calidad del documento de
 
 Para probar con un PDF suelto sin tocar la web ni la base de datos:
 `python3 cargar_idiomas.py --local archivo.pdf --provincia València --fecha 2026-09-30`
+
+### Revisar de golpe todos los PDF históricos
+
+Pestaña Actions → «Informe de idiomas (revisión completa de todos los PDF)» → Run workflow. Vuelve a
+descargar y analizar TODOS los PDF de las 3 direcciones territoriales y todos los cursos (también los
+que ya estaban cargados antes), sin tocar la base de datos pase lo que pase: es solo para comprobar,
+con la versión actual del robot, cuáles se leen bien y cuáles no. Al acabar deja descargable (en la
+propia página del workflow, abajo del todo, en «Artifacts») un `informe_idiomas.csv` con una fila por
+PDF: provincia, curso, archivo, estado (`ok` / `error`), cuántos nombres se cargaron, cuántos
+homónimos/sospechosos/ambiguos se excluyeron, y si dio error, el motivo exacto. Puede tardar bastante
+(recorre todo el histórico), así que no pasa nada si tarda una hora o más.

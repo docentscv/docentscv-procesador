@@ -1,0 +1,29 @@
+name: Informe de idiomas (revisión completa de todos los PDF)
+on:
+  workflow_dispatch:   # solo a mano, desde la pestaña Actions → "Run workflow"
+concurrency:
+  group: idiomas
+  cancel-in-progress: false
+jobs:
+  informe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar pdfplumber
+        run: pip install --quiet --break-system-packages pdfplumber || pip install --quiet pdfplumber
+      - name: Instalar Tesseract (OCR, para los PDF sin texto real)
+        run: |
+          timeout 150 sudo apt-get update -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15
+          timeout 150 sudo apt-get install -y -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 tesseract-ocr tesseract-ocr-spa
+          pip install --quiet --break-system-packages pytesseract || pip install --quiet pytesseract
+      - name: Volver a analizar TODOS los PDF y generar el informe
+        run: python3 cargar_idiomas.py --todos
+        # No necesita DATABASE_URL: este modo nunca escribe en la base de datos, solo analiza y genera el CSV.
+      - name: Subir el informe como descarga de este workflow
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: informe-idiomas
+          path: informe_idiomas.csv
+          if-no-files-found: warn
