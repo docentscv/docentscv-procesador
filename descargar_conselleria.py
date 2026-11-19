@@ -7,7 +7,7 @@ Seguridad:
   · Solo PDF de los últimos DIAS_ATRAS días y que no estén ya registrados (mismo nombre y tipo).
   · En las ejecuciones programadas solo actúa de lunes a viernes, de 07:00 a 22:00 (hora de Madrid), como mucho cada ~25 minutos.
   · Se identifica con un nombre propio (no se hace pasar por un navegador)."""
-import os, re, sys, datetime, urllib.request, urllib.parse
+import os, re, sys, time, subprocess, datetime, urllib.request, urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import buscar_pdfs as bp
 
@@ -62,6 +62,73 @@ def ahora_madrid():
     except Exception: return datetime.datetime.utcnow() + datetime.timedelta(hours=1)
 
 
+def _guardar(n, u, tipo, cuerpo, psql, lit, limpiar):
+    """Descarga un PDF ya detectado como nuevo y lo deja 'pendiente'. True si lo ha guardado."""
+    try:
+        rq = urllib.request.Request(u, headers={'User-Agent': bp.UA})
+        with urllib.request.urlopen(rq, timeout=120) as r: datos = r.read()
+        if not datos.startswith(b'%PDF'): print('    no parece un PDF, lo salto'); return False
+        ruta = 'pendientes/' + datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S') + '_' + re.sub(r'[^\w.\-]', '_', n)
+        key = limpiar('SUPABASE_SERVICE_KEY')
+        su = limpiar('SUPABASE_URL').rstrip('/') + '/storage/v1/object/pdfs/' + urllib.parse.quote(ruta)
+        up = urllib.request.Request(su, data=datos, method='POST', headers={'apikey': key, 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/pdf'})
+        urllib.request.urlopen(up, timeout=120).read()
+        psql(f"insert into importaciones (archivo, nombre_original, tipo, cuerpo) values ({lit(ruta)}, {lit(n)}, {lit(tipo)}, {lit(cuerpo)})")
+        print('    guardado como pendiente')
+        return True
+    except Exception as e: print('    ERROR:', repr(e)[:300]); return False
+
+
+# Qué toca vigilar cada día (0 = lunes ... 4 = viernes):
+#   lunes/miércoles: salen las plazas de continua · martes: adjudicación continua (del día anterior lectivo)
+#   jueves: adjudicación continua (del miércoles) + salen las plazas de difícil cobertura · viernes: adjudicación de difícil cobertura
+TIPOS_POR_DIA = {0: ['ofertas'], 1: ['continua'], 2: ['ofertas'], 3: ['continua', 'dificil'], 4: ['dificil_adj']}
+
+
+def vigilancia(psql, lit, limpiar, pausa=60, hasta_hora=14):
+    """Pensado para lanzarlo a las 8:00: mira la web de la Conselleria sin parar (cada `pausa` segundos,
+    sin el límite habitual de 'como mucho cada 25 minutos') hasta que salga lo que toca hoy, o hasta las
+    `hasta_hora` (GitHub no deja que un job dure más de 6 horas, así que de 8:00 no puede pasar de 14:00).
+    En cuanto aparece cada PDF esperado lo descarga, lo deja pendiente y lo procesa al momento (no espera
+    a que salgan los demás), para publicarlo lo antes posible. Si a esa hora sigue faltando algo, avisa."""
+    n = ahora_madrid()
+    tipos = TIPOS_POR_DIA.get(n.weekday(), [])
+    if not tipos: print('Vigilancia: hoy no toca nada (fin de semana).'); return 0
+    real = os.environ.get('AUTO_DESCARGA', '').strip() == '1'
+    if not real: print('Vigilancia: AUTO_DESCARGA no está activada; en modo vigilancia no tiene sentido simular, me paro aquí.'); return 0
+    print(f'Vigilancia: hoy ({n.strftime("%A")}) toca {", ".join(tipos)}. Compruebo cada {pausa}s hasta que salga, o hasta las {hasta_hora}:00.')
+    visto = {t: set() for t in tipos}   # tipo -> cuerpos ya encontrados hoy ('continua' necesita 'maestros' y 'otros'; el resto, con uno vale)
+    intentos = encontrados_total = 0
+    while True:
+        intentos += 1
+        faltan = [t for t in tipos if not ({'maestros', 'otros'} <= visto[t] if t == 'continua' else visto[t])]
+        if not faltan: print(f'Vigilancia: ya ha salido todo lo de hoy (tras {intentos} comprobación(es)).'); return encontrados_total
+        n = ahora_madrid()
+        if n.hour >= hasta_hora:
+            print(f'Vigilancia: a las {hasta_hora}:00 todavía falta {", ".join(faltan)}; lo dejo por hoy y aviso.')
+            try:
+                import avisos
+                avisos.avisar_admin(psql, lit, [(f'Vigilancia de hoy sin terminar: sigue faltando {", ".join(faltan)}', False, 'Revisa la web de la Conselleria a mano, o relanza la vigilancia desde Actions')], titulo='⚠️ No ha salido todo lo esperado hoy')
+            except Exception as e: print('  no se pudo avisar:', repr(e)[:120])
+            return encontrados_total
+        encontrados_ronda = 0
+        try: cands = candidatos()
+        except Exception as e: print('  no se pudo mirar la web:', repr(e)[:150]); cands = []
+        for nom, u, tipo, cuerpo in cands:
+            if tipo not in faltan: continue
+            ya = psql(f"select count(*) from importaciones where nombre_original = {lit(nom)} and tipo = {lit(tipo)}", tuples=True).strip()
+            if ya != '0': visto[tipo].add(cuerpo); continue
+            print(f'  ¡ENCONTRADO! {nom} ({tipo}, {cuerpo}) tras {intentos} comprobación(es) <- {u}')
+            if _guardar(nom, u, tipo, cuerpo, psql, lit, limpiar):
+                visto[tipo].add(cuerpo); encontrados_ronda += 1; encontrados_total += 1
+        if encontrados_ronda:
+            print('  proceso lo encontrado para publicarlo ya...')
+            try: subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'procesar_pdfs.py')], check=False)
+            except Exception as e: print('  no se pudo procesar al momento (se procesará en el siguiente paso):', repr(e)[:200])
+        else:
+            time.sleep(pausa)
+
+
 def vigilar_continua(psql, lit, ahora=None):
     """Los martes y jueves (días de adjudicación continua), a partir de las 15:00, si todavía no están cargadas las dos listas
     de ese día (maestros y secundaria/otros) avisa UNA vez al día a los administradores por notificación push."""
@@ -101,18 +168,7 @@ def main(psql, lit, limpiar):
         if ya != '0': print('  ya registrado:', n, f'({tipo})'); continue
         print('  NUEVO:', n, f'({tipo}, {cuerpo})', '<-', u)
         if not real: continue
-        try:
-            rq = urllib.request.Request(u, headers={'User-Agent': bp.UA})
-            with urllib.request.urlopen(rq, timeout=120) as r: datos = r.read()
-            if not datos.startswith(b'%PDF'): print('    no parece un PDF, lo salto'); continue
-            ruta = 'pendientes/' + datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S') + '_' + re.sub(r'[^\w.\-]', '_', n)
-            key = limpiar('SUPABASE_SERVICE_KEY')
-            su = limpiar('SUPABASE_URL').rstrip('/') + '/storage/v1/object/pdfs/' + urllib.parse.quote(ruta)
-            up = urllib.request.Request(su, data=datos, method='POST', headers={'apikey': key, 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/pdf'})
-            urllib.request.urlopen(up, timeout=120).read()
-            psql(f"insert into importaciones (archivo, nombre_original, tipo, cuerpo) values ({lit(ruta)}, {lit(n)}, {lit(tipo)}, {lit(cuerpo)})")
-            nuevos += 1; print('    guardado como pendiente')
-        except Exception as e: print('    ERROR:', repr(e)[:300])
+        if _guardar(n, u, tipo, cuerpo, psql, lit, limpiar): nuevos += 1
     print('PDF nuevos registrados:', nuevos); return nuevos
 
 

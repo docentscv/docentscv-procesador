@@ -1,0 +1,44 @@
+name: Vigilancia (comprobar sin parar hasta que salga lo de hoy)
+on:
+  workflow_dispatch:   # pensado para lanzarlo a las 8:00 desde un aviso externo (ver LEEME.md)
+concurrency:
+  group: procesar   # mismo grupo que "Procesar PDF pendientes", para no pisarse con él
+  cancel-in-progress: false
+jobs:
+  vigilar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360   # el máximo que deja GitHub por job (6 horas); de 8:00 llega hasta las 14:00
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar herramientas
+        timeout-minutes: 12
+        run: |
+          if command -v pdftotext >/dev/null && command -v psql >/dev/null; then echo "Ya estaban instaladas"; exit 0; fi
+          if timeout 150 sudo apt-get update -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 \
+             && timeout 150 sudo apt-get install -y -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 poppler-utils postgresql-client; then
+            echo "Instaladas desde Ubuntu"; exit 0
+          fi
+          echo "::warning::Los servidores de Ubuntu no responden; instalo las herramientas desde conda-forge"
+          cd "$HOME"
+          curl -fsSL --retry 5 --retry-delay 5 https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj bin/micromamba
+          PKGS="poppler"; command -v psql >/dev/null || PKGS="$PKGS postgresql"
+          ./bin/micromamba create -y -q -r "$HOME/mamba" -p "$HOME/herr" -c conda-forge $PKGS
+          echo "$HOME/herr/bin" >> "$GITHUB_PATH"
+      - name: Instalar librería de notificaciones
+        run: pip install --quiet --break-system-packages pywebpush || pip install --quiet pywebpush
+      - name: Vigilar la web de la Conselleria sin parar hasta que salga lo de hoy
+        run: python3 -c "import descargar_conselleria as dc, procesar_pdfs as pp; dc.vigilancia(pp.psql, pp.lit, pp.limpiar)"
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          AUTO_DESCARGA: '1'   # en vigilancia siempre es real; si no hay nada que vigilar hoy, no hace nada
+      - name: Por si algo quedó sin procesar
+        if: always()
+        run: python3 procesar_pdfs.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
