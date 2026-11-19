@@ -32,5 +32,13 @@ OCR se usa tal cual (si se equivoca en una letra, esa persona simplemente no coi
 carga: no se carga mal). El nivel (B2/C1/C2) solo se acepta si se lee exacto o con una corrección evidente
 de una sola letra; si queda ambiguo, también va a `idiomas_revisar` en vez de adivinarlo.
 
+Los listados más antiguos (se ha visto al menos hasta 2019) usan además otra maqueta de tabla: una
+columna por idioma (Ang/Fra/Ale/Ita) en vez de una fila por idioma con la palabra "Anglès" al lado. El
+robot también reconoce este formato (busca la columna "Ang" por su cabecera). En escaneados muy
+antiguos y de poca calidad, el OCR a veces confunde la "B" con una "e" o un "6", lo que puede dejar el
+nivel igual de parecido a B2 que a C2 (un empate real): esas filas también van a `idiomas_revisar`, nunca
+se adivinan. Cuantos más años antiguos y escaneados se procesen, más es esperable encontrar en esa tabla
+de revisión manual — no es un fallo del robot, es la calidad del documento de origen.
+
 Para probar con un PDF suelto sin tocar la web ni la base de datos:
 `python3 cargar_idiomas.py --local archivo.pdf --provincia València --fecha 2026-09-30`
