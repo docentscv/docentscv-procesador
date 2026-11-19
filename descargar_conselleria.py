@@ -101,6 +101,25 @@ def vigilancia(psql, lit, limpiar, pausa=60, hasta_hora=14):
     intentos = encontrados_total = 0
     while True:
         intentos += 1
+        # Primero se mira de verdad qué hay (en la web Y en la base de datos): 'visto' empieza vacío en
+        # cada llamada, así que si no se comprobara esto ANTES de decidir qué falta, una vigilancia
+        # lanzada ya tarde (p. ej. a mano, o si algo retrasa el aviso externo) daría una falsa alarma de
+        # "falta todo" aunque ya estuviera cargado desde hace horas por la vía normal.
+        encontrados_ronda = 0
+        try: cands = candidatos()
+        except Exception as e: print('  no se pudo mirar la web:', repr(e)[:150]); cands = []
+        for nom, u, tipo, cuerpo in cands:
+            completo = ({'maestros', 'otros'} <= visto[tipo]) if tipo == 'continua' else bool(visto[tipo])
+            if tipo not in tipos or completo: continue
+            ya = psql(f"select count(*) from importaciones where nombre_original = {lit(nom)} and tipo = {lit(tipo)}", tuples=True).strip()
+            if ya != '0': visto[tipo].add(cuerpo); continue
+            print(f'  ¡ENCONTRADO! {nom} ({tipo}, {cuerpo}) tras {intentos} comprobación(es) <- {u}')
+            if _guardar(nom, u, tipo, cuerpo, psql, lit, limpiar):
+                visto[tipo].add(cuerpo); encontrados_ronda += 1; encontrados_total += 1
+        if encontrados_ronda:
+            print('  proceso lo encontrado para publicarlo ya...')
+            try: subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'procesar_pdfs.py')], check=False)
+            except Exception as e: print('  no se pudo procesar al momento (se procesará en el siguiente paso):', repr(e)[:200])
         faltan = [t for t in tipos if not ({'maestros', 'otros'} <= visto[t] if t == 'continua' else visto[t])]
         if not faltan: print(f'Vigilancia: ya ha salido todo lo de hoy (tras {intentos} comprobación(es)).'); return encontrados_total
         n = ahora_madrid()
@@ -111,22 +130,7 @@ def vigilancia(psql, lit, limpiar, pausa=60, hasta_hora=14):
                 avisos.avisar_admin(psql, lit, [(f'Vigilancia de hoy sin terminar: sigue faltando {", ".join(faltan)}', False, 'Revisa la web de la Conselleria a mano, o relanza la vigilancia desde Actions')], titulo='⚠️ No ha salido todo lo esperado hoy')
             except Exception as e: print('  no se pudo avisar:', repr(e)[:120])
             return encontrados_total
-        encontrados_ronda = 0
-        try: cands = candidatos()
-        except Exception as e: print('  no se pudo mirar la web:', repr(e)[:150]); cands = []
-        for nom, u, tipo, cuerpo in cands:
-            if tipo not in faltan: continue
-            ya = psql(f"select count(*) from importaciones where nombre_original = {lit(nom)} and tipo = {lit(tipo)}", tuples=True).strip()
-            if ya != '0': visto[tipo].add(cuerpo); continue
-            print(f'  ¡ENCONTRADO! {nom} ({tipo}, {cuerpo}) tras {intentos} comprobación(es) <- {u}')
-            if _guardar(nom, u, tipo, cuerpo, psql, lit, limpiar):
-                visto[tipo].add(cuerpo); encontrados_ronda += 1; encontrados_total += 1
-        if encontrados_ronda:
-            print('  proceso lo encontrado para publicarlo ya...')
-            try: subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'procesar_pdfs.py')], check=False)
-            except Exception as e: print('  no se pudo procesar al momento (se procesará en el siguiente paso):', repr(e)[:200])
-        else:
-            time.sleep(pausa)
+        time.sleep(pausa)
 
 
 def vigilar_continua(psql, lit, ahora=None):
