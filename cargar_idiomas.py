@@ -33,7 +33,7 @@ Uso:
   python3 cargar_idiomas.py                    # recorrer toda la web (real solo si AUTO_CARGA=1)
   python3 cargar_idiomas.py --local X.pdf --provincia València [--fecha AAAA-MM-DD]   # probar con un PDF local
 """
-import os, re, sys, time, argparse, datetime, subprocess, urllib.request, urllib.parse
+import os, re, sys, csv, time, argparse, datetime, subprocess, urllib.request, urllib.parse
 from html.parser import HTMLParser
 from collections import Counter
 
@@ -518,6 +518,9 @@ def main():
     ap.add_argument('--local', help='Probar con un PDF ya descargado, sin tocar la web ni fuentes_idioma')
     ap.add_argument('--provincia', default='València')
     ap.add_argument('--fecha', help='AAAA-MM-DD; si no se da, se intenta sacar del nombre del archivo (AAAA_MM_DD.pdf)')
+    ap.add_argument('--todos', action='store_true',
+                     help='Volver a analizar TODOS los PDF encontrados en la web (también los ya procesados antes), '
+                          'sin escribir nada en la base de datos, y guardar un informe en informe_idiomas.csv')
     a = ap.parse_args()
     real = os.environ.get('AUTO_CARGA', '').strip() == '1'
     print('Acreditación de idiomas ·', 'REAL' if real else 'SIMULACIÓN (no escribe nada en la base de datos)')
@@ -531,6 +534,64 @@ def main():
         n, h, s, a_, o = procesar_pdf(a.local, a.provincia, fecha, 'local:' + a.local, real)
         print(f'{n} cargables, {h} homónimos excluidos, {s} sospechosos excluidos, {a_} ambiguos de OCR excluidos '
               f'(de {n + h + s + a_} filas de inglés; {o} página(s) leídas por OCR)')
+        return
+
+    if a.todos:
+        print('Modo informe: se vuelven a analizar TODOS los PDF encontrados en la web (también los ya '
+              'procesados antes). No se escribe nada en la base de datos pase lo que pase.')
+        print('Buscando carpetas en', RAIZ)
+        carpetas = listar_carpetas()
+        print(f'{len(carpetas)} carpeta(s) de curso encontradas')
+        campos = ['provincia', 'curso', 'archivo', 'fecha', 'url', 'estado', 'cargables', 'homonimos', 'sospechosos', 'ambiguos', 'paginas_ocr', 'motivo']
+        filas_csv, ok, con_error = [], 0, 0
+        with_tmp = __import__('tempfile').TemporaryDirectory()
+        tmp = with_tmp.name
+        for provincia, curso, url_carpeta in carpetas:
+            time.sleep(PAUSA)
+            try:
+                pdfs = listar_pdfs(url_carpeta)
+            except Exception as e:
+                print(f'  [{provincia} {curso}] no se pudo leer la carpeta:', repr(e)[:150]); continue
+            for nombre, url_pdf in pdfs:
+                fila = dict.fromkeys(campos, '')
+                fila.update(provincia=provincia, curso=curso, archivo=nombre, url=url_pdf,
+                            cargables=0, homonimos=0, sospechosos=0, ambiguos=0, paginas_ocr=0)
+                fecha = fecha_de_nombre(nombre)
+                if not fecha:
+                    fila.update(estado='error', motivo='nombre de archivo inesperado, no se pudo deducir la fecha')
+                    print(f'  [{provincia} {curso}] {nombre}: nombre de archivo inesperado, lo salto')
+                    con_error += 1; filas_csv.append(fila); continue
+                fila['fecha'] = fecha.isoformat()
+                time.sleep(PAUSA)
+                ruta = os.path.join(tmp, re.sub(r'[^\w.\-]', '_', nombre))
+                try:
+                    peso = descargar_pdf(url_pdf, ruta)
+                    n, h, s, a_, o = procesar_pdf(ruta, provincia, fecha, url_pdf, False)
+                    fila.update(estado='ok', cargables=n, homonimos=h, sospechosos=s, ambiguos=a_, paginas_ocr=o)
+                    ocr_txt = f', {o} pág. por OCR' if o else ''
+                    print(f'  [{provincia} {curso}] {nombre} ({peso // 1024} KB): {n} cargables, {h} homónimos, '
+                          f'{s} sospechosos, {a_} ambiguos de OCR{ocr_txt}')
+                    ok += 1
+                except Exception as e:
+                    motivo = str(e)[:300] if isinstance(e, Fallo) else ('error inesperado: ' + repr(e)[:250])
+                    fila.update(estado='error', motivo=motivo)
+                    con_error += 1
+                    print(f'  [{provincia} {curso}] {nombre}: ERROR ·', motivo)
+                finally:
+                    if os.path.exists(ruta):
+                        os.remove(ruta)
+                filas_csv.append(fila)
+        with_tmp.cleanup()
+        with open('informe_idiomas.csv', 'w', newline='', encoding='utf-8') as f:
+            w = csv.DictWriter(f, fieldnames=campos)
+            w.writeheader()
+            w.writerows(filas_csv)
+        print(f'\nInforme guardado en informe_idiomas.csv: {len(filas_csv)} PDF analizados · {ok} correctos · {con_error} con error')
+        errores = [f for f in filas_csv if f['estado'] == 'error']
+        if errores:
+            print(f'\nPDF a revisar ({len(errores)}) — no se pudo sacar nada en claro, hay que ver cómo bajarlos:')
+            for f in errores:
+                print(f"  - [{f['provincia']} {f['curso']}] {f['archivo']}: {f['motivo']}")
         return
 
     if real:
