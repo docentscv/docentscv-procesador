@@ -109,8 +109,9 @@ def vigilancia(psql, lit, limpiar, pausa=60, hasta_hora=14):
         try: cands = candidatos()
         except Exception as e: print('  no se pudo mirar la web:', repr(e)[:150]); cands = []
         for nom, u, tipo, cuerpo in cands:
+            if tipo not in tipos: continue   # candidatos() puede devolver tipos de otros días (p. ej. 'ofertas' en jueves): no están en 'visto'
             completo = ({'maestros', 'otros'} <= visto[tipo]) if tipo == 'continua' else bool(visto[tipo])
-            if tipo not in tipos or completo: continue
+            if completo: continue
             ya = psql(f"select count(*) from importaciones where nombre_original = {lit(nom)} and tipo = {lit(tipo)}", tuples=True).strip()
             if ya != '0': visto[tipo].add(cuerpo); continue
             print(f'  ¡ENCONTRADO! {nom} ({tipo}, {cuerpo}) tras {intentos} comprobación(es) <- {u}')
