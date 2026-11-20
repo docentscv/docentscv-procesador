@@ -521,7 +521,35 @@ def main():
     ap.add_argument('--todos', action='store_true',
                      help='Volver a analizar TODOS los PDF encontrados en la web (también los ya procesados antes), '
                           'sin escribir nada en la base de datos, y guardar un informe en informe_idiomas.csv')
+    ap.add_argument('--estado', action='store_true',
+                     help='Solo mira lo que ya hay en la base de datos (cifras, sin nombres): cuántas acreditaciones '
+                          'hay cargadas y cuánta gente sigue pendiente de revisión manual en idiomas_revisar, '
+                          'con el motivo agrupado (OCR ambiguo, homónimo, nombre sospechoso)')
     a = ap.parse_args()
+
+    if a.estado:
+        print('--- acreditaciones_idioma (cargadas de verdad) ---')
+        print(psql("select idioma, nivel, count(*) as personas from acreditaciones_idioma "
+                    "group by idioma, nivel order by idioma, nivel;"))
+        print('--- idiomas_revisar (pendiente de decidir a mano; no cuenta como acreditado) ---')
+        print(psql("""
+select
+  case
+    when motivo like 'nivel no reconocido%' then 'ocr: nivel ambiguo (p.ej. B2 vs C2)'
+    when motivo like 'homónimo%'            then 'homónimo (mismo nombre, dos niveles en el mismo listado)'
+    when motivo like 'nombre sospechoso%'   then 'nombre sospechoso (posible fallo de extracción del PDF)'
+    else 'otro'
+  end as motivo_agrupado,
+  count(*) as filas,
+  count(distinct nombre) as personas_distintas,
+  count(distinct fuente_url) as pdf_distintos,
+  min(creado)::date as mas_antiguo,
+  max(creado)::date as mas_reciente
+from idiomas_revisar
+group by 1
+order by filas desc;
+"""))
+        return
     real = os.environ.get('AUTO_CARGA', '').strip() == '1'
     print('Acreditación de idiomas ·', 'REAL' if real else 'SIMULACIÓN (no escribe nada en la base de datos)')
 

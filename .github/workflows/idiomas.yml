@@ -8,6 +8,10 @@ on:
         description: 'Descargar y registrar de verdad los PDF nuevos (si no, solo simula: busca y analiza, pero no guarda nada)'
         type: boolean
         default: false
+      estado:
+        description: 'Solo consultar lo que ya hay en la base de datos (cifras, sin nombres); no busca PDF nuevos. Ignora «cargar» si se marca esto.'
+        type: boolean
+        default: false
 concurrency:
   group: idiomas
   cancel-in-progress: false
@@ -22,14 +26,22 @@ jobs:
           if command -v psql >/dev/null; then echo "Ya estaba instalado"; exit 0; fi
           timeout 150 sudo apt-get update -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15
           timeout 150 sudo apt-get install -y -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 postgresql-client
+      - name: Consultar estado (sin buscar PDF nuevos)
+        if: github.event_name == 'workflow_dispatch' && inputs.estado
+        run: python3 cargar_idiomas.py --estado
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Instalar pdfplumber
+        if: "!(github.event_name == 'workflow_dispatch' && inputs.estado)"
         run: pip install --quiet --break-system-packages pdfplumber || pip install --quiet pdfplumber
       - name: Instalar Tesseract (OCR, para los PDF sin texto real)
+        if: "!(github.event_name == 'workflow_dispatch' && inputs.estado)"
         run: |
           timeout 150 sudo apt-get update -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15
           timeout 150 sudo apt-get install -y -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 tesseract-ocr tesseract-ocr-spa
           pip install --quiet --break-system-packages pytesseract || pip install --quiet pytesseract
       - name: Buscar y cargar acreditaciones de inglés
+        if: "!(github.event_name == 'workflow_dispatch' && inputs.estado)"
         run: python3 cargar_idiomas.py
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
