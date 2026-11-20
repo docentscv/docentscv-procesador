@@ -878,13 +878,37 @@ order by
                          f"values ({lit(url_pdf)}, {lit(provincia)}, {lit(curso)}, {lit(nombre)}, {lit(fecha.isoformat() if fecha else None) if fecha else 'null'}, 'error', {lit(motivo)}) "
                          f"on conflict (url) do update set estado = excluded.estado, motivo = excluded.motivo, procesado_en = now()")
     with_tmp.cleanup()
+
+    # Limpieza automática de lo que se pueda resolver solo, para que idiomas_revisar no vaya
+    # acumulando sin que nadie se dé cuenta: duplicados puros (mismo nombre, mismo nivel repetido
+    # en el mismo PDF) y nombres sospechosos cuyo apellido pegado coincide con una única persona
+    # ya existente. Nunca toca los homónimos genuinamente ambiguos ni los sospechosos sin
+    # coincidencia: esos siguen esperando revisión a mano.
+    n_dup = personas_sosp = 0
+    if real:
+        try:
+            n_dup = limpiar_homonimos_duplicados()
+            if n_dup:
+                print(f'  limpieza automática: {n_dup} homónimo(s) que eran duplicados puros, cargados')
+        except Exception as e:
+            print('  no se ha podido limpiar homónimos duplicados:', repr(e)[:150])
+        try:
+            personas_sosp, _ = limpiar_sospechosos_resolubles()
+            if personas_sosp:
+                print(f'  limpieza automática: {personas_sosp} nombre(s) sospechoso(s) resueltos por coincidencia única, cargados')
+        except Exception as e:
+            print('  no se han podido resolver nombres sospechosos:', repr(e)[:150])
+
     print(f'\nPDF nuevos procesados: {nuevos} (personas cargadas: {personas_nuevas}) · con error: {con_error}')
     if not real:
         print('(simulación: no se ha escrito nada en la base de datos; lánzalo a mano con "Descargar y registrar de verdad" para cargarlo.)')
     if real and (nuevos or con_error):
         try:
             import avisos
-            resumen = f'{personas_nuevas} persona(s) con inglés acreditado cargadas desde {nuevos} PDF' + (f' · {con_error} con error, revisar' if con_error else '')
+            extra = (n_dup + personas_sosp)
+            resumen = (f'{personas_nuevas} persona(s) con inglés acreditado cargadas desde {nuevos} PDF'
+                       + (f' · {extra} más resuelta(s) automáticamente de la cola de revisión' if extra else '')
+                       + (f' · {con_error} con error, revisar' if con_error else ''))
             avisos.avisar_admin(psql, lit, [('Acreditación de idiomas (inglés)', con_error == 0, resumen, None)],
                                  titulo='🌍 Acreditación de idiomas actualizada' if con_error == 0 else '⚠️ Acreditación de idiomas: hubo errores')
         except Exception as e:
