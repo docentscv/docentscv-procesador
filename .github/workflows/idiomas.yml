@@ -16,6 +16,10 @@ on:
         description: 'Con «estado» marcado: además lista fila a fila lo pendiente en idiomas_revisar (sí lleva nombres)'
         type: boolean
         default: false
+      limpiar_duplicados:
+        description: 'Resuelve los homónimos de idiomas_revisar que eran duplicados puros (mismo nombre, mismo nivel repetido en el PDF) y los carga. Ignora el resto de opciones si se marca esto.'
+        type: boolean
+        default: false
 concurrency:
   group: idiomas
   cancel-in-progress: false
@@ -31,21 +35,26 @@ jobs:
           timeout 150 sudo apt-get update -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15
           timeout 150 sudo apt-get install -y -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 postgresql-client
       - name: Consultar estado (sin buscar PDF nuevos)
-        if: github.event_name == 'workflow_dispatch' && inputs.estado
+        if: github.event_name == 'workflow_dispatch' && inputs.estado && !inputs.limpiar_duplicados
         run: python3 cargar_idiomas.py ${{ (inputs.detalle && '--detalle') || '--estado' }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Limpiar homónimos que eran duplicados puros
+        if: github.event_name == 'workflow_dispatch' && inputs.limpiar_duplicados
+        run: python3 cargar_idiomas.py --limpiar-duplicados
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Instalar pdfplumber
-        if: "!(github.event_name == 'workflow_dispatch' && inputs.estado)"
+        if: "!(github.event_name == 'workflow_dispatch' && (inputs.estado || inputs.limpiar_duplicados))"
         run: pip install --quiet --break-system-packages pdfplumber || pip install --quiet pdfplumber
       - name: Instalar Tesseract (OCR, para los PDF sin texto real)
-        if: "!(github.event_name == 'workflow_dispatch' && inputs.estado)"
+        if: "!(github.event_name == 'workflow_dispatch' && (inputs.estado || inputs.limpiar_duplicados))"
         run: |
           timeout 150 sudo apt-get update -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15
           timeout 150 sudo apt-get install -y -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 tesseract-ocr tesseract-ocr-spa
           pip install --quiet --break-system-packages pytesseract || pip install --quiet pytesseract
       - name: Buscar y cargar acreditaciones de inglés
-        if: "!(github.event_name == 'workflow_dispatch' && inputs.estado)"
+        if: "!(github.event_name == 'workflow_dispatch' && (inputs.estado || inputs.limpiar_duplicados))"
         run: python3 cargar_idiomas.py
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
