@@ -35,7 +35,7 @@ Uso:
 """
 import os, re, sys, csv, time, argparse, datetime, subprocess, urllib.request, urllib.parse
 from html.parser import HTMLParser
-from collections import Counter
+from collections import Counter, defaultdict
 
 RAIZ = 'https://ceice.gva.es/es/web/rrhh-educacion/listados-definitivos'
 UA = 'Mozilla/5.0 (compatible; DocentsCV/1.0; +https://docentscv.github.io/)'
@@ -461,17 +461,24 @@ def extraer_ingles(ruta):
 
 
 def clasificar(filas):
-    """Separa en: cargables, excluidos por homónimo (mismo nombre normalizado repetido en
-    el propio PDF con niveles distintos: no se puede saber cuál es cuál) y sospechosos
-    (parecen tener dos apellidos pegados sin espacio: fallo típico de extracción del PDF
-    de origen, no de nuestro analizador)."""
+    """Separa en: cargables, excluidos por homónimo (mismo nombre normalizado con DOS NIVELES
+    DISTINTOS de verdad en el propio PDF: no se puede saber cuál es cuál) y sospechosos (parecen
+    tener dos apellidos pegados sin espacio: fallo típico de extracción del PDF de origen, no de
+    nuestro analizador). Si el mismo nombre sale repetido varias veces pero siempre con el MISMO
+    nivel, no es un homónimo de verdad (es la misma fila leída más de una vez, p. ej. porque el PDF
+    la tenía duplicada visualmente): se carga una sola vez, sin pasar por revisión manual."""
     buenas, sospechosas = [], []
     for nombre, nivel in filas:
         primera = nombre.split(' ', 1)[0]
         (sospechosas if len(primera) > LARGO_SOSPECHOSO else buenas).append((nombre, nivel))
-    cnt = Counter(norm(n) for n, _ in buenas)
-    ambiguos = {nn for nn, c in cnt.items() if c > 1}
-    cargables = [(n, nv) for n, nv in buenas if norm(n) not in ambiguos]
+    niveles_por_nombre = defaultdict(set)
+    primera_fila = {}
+    for n, nv in buenas:
+        nn = norm(n)
+        niveles_por_nombre[nn].add(nv)
+        primera_fila.setdefault(nn, (n, nv))
+    ambiguos = {nn for nn, niveles in niveles_por_nombre.items() if len(niveles) > 1}
+    cargables = [primera_fila[nn] for nn in niveles_por_nombre if nn not in ambiguos]
     homonimos = [(n, nv) for n, nv in buenas if norm(n) in ambiguos]
     return cargables, homonimos, sospechosas
 
@@ -495,6 +502,58 @@ commit;
 """)
     for nombre, nivel, motivo in revisar:
         psql(f"insert into idiomas_revisar (fuente_url, nombre, nivel, motivo) values ({lit(fuente_url)}, {lit(nombre)}, {lit(nivel)}, {lit(motivo)})")
+
+
+def limpiar_homonimos_duplicados():
+    """Resuelve solos los homónimos de 'idiomas_revisar' que en realidad no eran ambiguos: mismo
+    nombre, mismo nivel repetido varias veces en el mismo PDF (una fila leída más de una vez, no dos
+    personas distintas). Los carga en acreditaciones_idioma y borra esas filas de idiomas_revisar.
+    Nunca toca un nombre que de verdad tenga dos niveles distintos en el mismo PDF: esos se quedan
+    para decidir a mano. Devuelve cuántos (nombre, PDF) se han resuelto así."""
+    # Trae las filas a Python y calcula norm() aquí (igual que cargar_en_bd), en vez de depender de
+    # que exista una función norm_nombre() invocable por SQL: así usamos exactamente la misma lógica
+    # de normalización que ya está probada en el resto del fichero.
+    crudo = psql("""
+select fuente_url, nombre, nivel from idiomas_revisar
+where motivo like 'homónimo%'
+order by fuente_url, nombre;
+""", tuples=True)
+    grupos = defaultdict(set)
+    for linea in crudo.strip('\n').split('\n'):
+        if not linea:
+            continue
+        fuente_url, nombre, nivel = linea.split('\t')
+        grupos[(fuente_url, nombre)].add(nivel)
+    resueltos = [(fu, nom, next(iter(niveles))) for (fu, nom), niveles in grupos.items() if len(niveles) == 1]
+    if not resueltos:
+        return 0
+    valores = ",\n".join(f"({lit(fu)},{lit(norm(nom))},{lit(nv)})" for fu, nom, nv in resueltos)
+    valores_borrar = ",\n".join(f"({lit(fu)},{lit(nom)})" for fu, nom, _ in resueltos)
+    psql(f"""
+begin;
+create temp table t_cand (fuente_url text, nn text, nivel text) on commit drop;
+insert into t_cand (fuente_url, nn, nivel) values
+{valores};
+
+insert into acreditaciones_idioma (persona_id, idioma, nivel, fecha, direccion_territorial)
+  select p.id, 'Anglès', t.nivel, fi.fecha, fi.provincia
+  from t_cand t
+  join fuentes_idioma fi on fi.url = t.fuente_url
+  join personas p on p.nombre_norm = t.nn
+  on conflict (persona_id, idioma) do update
+    set nivel = excluded.nivel, fecha = excluded.fecha, direccion_territorial = excluded.direccion_territorial
+    where excluded.fecha >= acreditaciones_idioma.fecha;
+
+create temp table t_borrar (fuente_url text, nombre text) on commit drop;
+insert into t_borrar (fuente_url, nombre) values
+{valores_borrar};
+
+delete from idiomas_revisar r
+  using t_borrar b
+  where r.motivo like 'homónimo%' and r.fuente_url = b.fuente_url and r.nombre = b.nombre;
+commit;
+""")
+    return len(resueltos)
 
 
 # ---------------------------------------------------------------- flujo principal ----
@@ -528,7 +587,15 @@ def main():
     ap.add_argument('--detalle', action='store_true',
                      help='Como --estado, pero además lista cada fila de idiomas_revisar (nombre, nivel, motivo, '
                           'PDF de origen) para poder revisarlas una a una')
+    ap.add_argument('--limpiar-duplicados', action='store_true',
+                     help='Resuelve solo los homónimos de idiomas_revisar que no eran ambiguos de verdad '
+                          '(mismo nombre, mismo nivel repetido en el mismo PDF): los carga y los borra de la cola')
     a = ap.parse_args()
+
+    if a.limpiar_duplicados:
+        n = limpiar_homonimos_duplicados()
+        print(f'{n} (nombre, PDF) resueltos automáticamente (mismo nivel repetido, sin ambigüedad real) y cargados.')
+        return
 
     if a.estado or a.detalle:
         print('--- acreditaciones_idioma (cargadas de verdad) ---')
