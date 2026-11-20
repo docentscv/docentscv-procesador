@@ -24,6 +24,10 @@ on:
         description: 'SOLO LECTURA: para los «nombre sospechoso», prueba a separar el apellido pegado y muestra con qué persona ya existente coincidiría. No toca la base de datos. Ignora el resto de opciones si se marca esto.'
         type: boolean
         default: false
+      limpiar_sospechosos:
+        description: 'Carga los «nombre sospechoso» cuyo apellido pegado, al separarlo, coincide con una única persona ya existente, y los borra de la cola. Ignora el resto de opciones si se marca esto.'
+        type: boolean
+        default: false
 concurrency:
   group: idiomas
   cancel-in-progress: false
@@ -53,17 +57,22 @@ jobs:
         run: python3 cargar_idiomas.py --sospechosos-candidatos
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Cargar nombres sospechosos resolubles
+        if: github.event_name == 'workflow_dispatch' && inputs.limpiar_sospechosos
+        run: python3 cargar_idiomas.py --limpiar-sospechosos
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Instalar pdfplumber
-        if: "!(github.event_name == 'workflow_dispatch' && (inputs.estado || inputs.limpiar_duplicados || inputs.sospechosos_candidatos))"
+        if: "!(github.event_name == 'workflow_dispatch' && (inputs.estado || inputs.limpiar_duplicados || inputs.sospechosos_candidatos || inputs.limpiar_sospechosos))"
         run: pip install --quiet --break-system-packages pdfplumber || pip install --quiet pdfplumber
       - name: Instalar Tesseract (OCR, para los PDF sin texto real)
-        if: "!(github.event_name == 'workflow_dispatch' && (inputs.estado || inputs.limpiar_duplicados || inputs.sospechosos_candidatos))"
+        if: "!(github.event_name == 'workflow_dispatch' && (inputs.estado || inputs.limpiar_duplicados || inputs.sospechosos_candidatos || inputs.limpiar_sospechosos))"
         run: |
           timeout 150 sudo apt-get update -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15
           timeout 150 sudo apt-get install -y -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 tesseract-ocr tesseract-ocr-spa
           pip install --quiet --break-system-packages pytesseract || pip install --quiet pytesseract
       - name: Buscar y cargar acreditaciones de inglés
-        if: "!(github.event_name == 'workflow_dispatch' && (inputs.estado || inputs.limpiar_duplicados || inputs.sospechosos_candidatos))"
+        if: "!(github.event_name == 'workflow_dispatch' && (inputs.estado || inputs.limpiar_duplicados || inputs.sospechosos_candidatos || inputs.limpiar_sospechosos))"
         run: python3 cargar_idiomas.py
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
