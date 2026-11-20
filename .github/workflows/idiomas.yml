@@ -12,6 +12,10 @@ on:
         description: 'Solo consultar lo que ya hay en la base de datos (cifras, sin nombres); no busca PDF nuevos. Ignora «cargar» si se marca esto.'
         type: boolean
         default: false
+      detalle:
+        description: 'Con «estado» marcado: además lista fila a fila lo pendiente en idiomas_revisar (sí lleva nombres)'
+        type: boolean
+        default: false
 concurrency:
   group: idiomas
   cancel-in-progress: false
@@ -28,7 +32,7 @@ jobs:
           timeout 150 sudo apt-get install -y -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=15 postgresql-client
       - name: Consultar estado (sin buscar PDF nuevos)
         if: github.event_name == 'workflow_dispatch' && inputs.estado
-        run: python3 cargar_idiomas.py --estado
+        run: python3 cargar_idiomas.py ${{ (inputs.detalle && '--detalle') || '--estado' }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Instalar pdfplumber

@@ -525,9 +525,12 @@ def main():
                      help='Solo mira lo que ya hay en la base de datos (cifras, sin nombres): cuántas acreditaciones '
                           'hay cargadas y cuánta gente sigue pendiente de revisión manual en idiomas_revisar, '
                           'con el motivo agrupado (OCR ambiguo, homónimo, nombre sospechoso)')
+    ap.add_argument('--detalle', action='store_true',
+                     help='Como --estado, pero además lista cada fila de idiomas_revisar (nombre, nivel, motivo, '
+                          'PDF de origen) para poder revisarlas una a una')
     a = ap.parse_args()
 
-    if a.estado:
+    if a.estado or a.detalle:
         print('--- acreditaciones_idioma (cargadas de verdad) ---')
         print(psql("select idioma, nivel, count(*) as personas from acreditaciones_idioma "
                     "group by idioma, nivel order by idioma, nivel;"))
@@ -548,6 +551,20 @@ select
 from idiomas_revisar
 group by 1
 order by filas desc;
+"""))
+        if a.detalle:
+            print('--- idiomas_revisar: detalle fila a fila ---')
+            print(psql("""
+select id, fuente_url, nombre, nivel, motivo, creado::date
+from idiomas_revisar
+order by
+  (case
+     when motivo like 'nivel no reconocido%' then 1
+     when motivo like 'homónimo%'            then 2
+     when motivo like 'nombre sospechoso%'   then 3
+     else 4
+   end),
+  fuente_url, nombre;
 """))
         return
     real = os.environ.get('AUTO_CARGA', '').strip() == '1'
