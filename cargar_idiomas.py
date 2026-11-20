@@ -504,6 +504,19 @@ commit;
         psql(f"insert into idiomas_revisar (fuente_url, nombre, nivel, motivo) values ({lit(fuente_url)}, {lit(nombre)}, {lit(nivel)}, {lit(motivo)})")
 
 
+def _particiones_candidatas(nombre, normas_existentes):
+    """Dado un 'nombre' ('PRIMERTOKEN resto...') donde PRIMERTOKEN puede tener dos apellidos
+    pegados, prueba a partirlo en dos en cada posición posible y devuelve el conjunto de
+    nombres normalizados de 'normas_existentes' con los que coincidiría el resultado."""
+    primera, _, resto = nombre.partition(' ')
+    coincidencias = set()
+    for i in range(2, len(primera) - 1):
+        candidato = norm(f'{primera[:i]} {primera[i:]} {resto}')
+        if candidato in normas_existentes:
+            coincidencias.add(candidato)
+    return coincidencias
+
+
 def candidatos_resolucion_sospechosos():
     """SOLO LECTURA: para cada fila de idiomas_revisar marcada 'nombre sospechoso' (posibles dos
     apellidos pegados sin espacio en el PDF de origen), prueba a partir el primer token en dos en
@@ -525,15 +538,66 @@ order by id;
     normas_existentes = set(l for l in psql("select nombre_norm from personas;", tuples=True).strip('\n').split('\n') if l)
     resultado = []
     for id_, fuente_url, nombre, nivel in filas:
-        primera, _, resto = nombre.partition(' ')
-        coincidencias = set()
-        for i in range(2, len(primera) - 1):
-            izq, der = primera[:i], primera[i:]
-            candidato = norm(f'{izq} {der} {resto}')
-            if candidato in normas_existentes:
-                coincidencias.add(candidato)
+        coincidencias = _particiones_candidatas(nombre, normas_existentes)
         resultado.append((id_, fuente_url, nombre, nivel, sorted(coincidencias)))
     return resultado
+
+
+def limpiar_sospechosos_resolubles():
+    """Carga los «nombre sospechoso» de idiomas_revisar cuyo apellido pegado, al partirlo, coincide
+    con UNA ÚNICA persona ya existente en la base (ver candidatos_resolucion_sospechosos: ahí se
+    puede revisar antes, sin escribir nada). Si la misma persona sale resuelta en más de un PDF con
+    niveles distintos (p. ej. porque obtuvo un nivel más alto más tarde), solo se carga el de la
+    fecha más reciente, igual que en el resto de la carga normal; todas las filas de esa persona se
+    sacan igualmente de la cola de revisión, ya resueltas. Devuelve (personas_resueltas, filas_borradas)."""
+    crudo = psql("""
+select r.id, r.fuente_url, r.nombre, r.nivel, fi.fecha, fi.provincia
+from idiomas_revisar r
+join fuentes_idioma fi on fi.url = r.fuente_url
+where r.motivo like 'nombre sospechoso%'
+order by r.id;
+""", tuples=True)
+    filas = [l.split('\t') for l in crudo.strip('\n').split('\n') if l]
+    if not filas:
+        return 0, 0
+    normas_existentes = set(l for l in psql("select nombre_norm from personas;", tuples=True).strip('\n').split('\n') if l)
+
+    por_persona = defaultdict(list)   # nombre_norm resuelto -> [(id, fecha, nivel, provincia), ...]
+    ids_resueltos = []
+    for id_, fuente_url, nombre, nivel, fecha, provincia in filas:
+        coincidencias = _particiones_candidatas(nombre, normas_existentes)
+        if len(coincidencias) == 1:
+            nn = next(iter(coincidencias))
+            por_persona[nn].append((id_, fecha, nivel, provincia))
+            ids_resueltos.append(id_)
+
+    if not por_persona:
+        return 0, 0
+
+    valores = []
+    for nn, entradas in por_persona.items():
+        _, fecha, nivel, provincia = max(entradas, key=lambda e: e[1])   # gana la fecha más reciente
+        valores.append(f"({lit(nn)},{lit(nivel)},{lit(fecha)},{lit(provincia)})")
+    ids_borrar = ",".join(ids_resueltos)
+
+    psql(f"""
+begin;
+create temp table t_cand (nn text, nivel text, fecha date, provincia text) on commit drop;
+insert into t_cand (nn, nivel, fecha, provincia) values
+{",\n".join(valores)};
+
+insert into acreditaciones_idioma (persona_id, idioma, nivel, fecha, direccion_territorial)
+  select p.id, 'Anglès', t.nivel, t.fecha, t.provincia
+  from t_cand t
+  join personas p on p.nombre_norm = t.nn
+  on conflict (persona_id, idioma) do update
+    set nivel = excluded.nivel, fecha = excluded.fecha, direccion_territorial = excluded.direccion_territorial
+    where excluded.fecha >= acreditaciones_idioma.fecha;
+
+delete from idiomas_revisar where id in ({ids_borrar});
+commit;
+""")
+    return len(por_persona), len(ids_resueltos)
 
 
 def limpiar_homonimos_duplicados():
@@ -626,11 +690,20 @@ def main():
                      help='SOLO LECTURA: para los «nombre sospechoso» de idiomas_revisar, prueba a separar '
                           'el apellido pegado y muestra con qué persona ya existente coincidiría cada uno '
                           '(sin tocar la base de datos)')
+    ap.add_argument('--limpiar-sospechosos', action='store_true',
+                     help='Carga los «nombre sospechoso» de idiomas_revisar cuyo apellido pegado, al separarlo, '
+                          'coincide con una única persona ya existente, y los borra de la cola')
     a = ap.parse_args()
 
     if a.limpiar_duplicados:
         n = limpiar_homonimos_duplicados()
         print(f'{n} (nombre, PDF) resueltos automáticamente (mismo nivel repetido, sin ambigüedad real) y cargados.')
+        return
+
+    if a.limpiar_sospechosos:
+        personas, filas = limpiar_sospechosos_resolubles()
+        print(f'{personas} persona(s) resuelta(s) por coincidencia única de nombre y cargada(s) '
+              f'({filas} fila(s) de idiomas_revisar resueltas).')
         return
 
     if a.sospechosos_candidatos:
