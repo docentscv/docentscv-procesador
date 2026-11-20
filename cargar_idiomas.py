@@ -504,6 +504,38 @@ commit;
         psql(f"insert into idiomas_revisar (fuente_url, nombre, nivel, motivo) values ({lit(fuente_url)}, {lit(nombre)}, {lit(nivel)}, {lit(motivo)})")
 
 
+def candidatos_resolucion_sospechosos():
+    """SOLO LECTURA: para cada fila de idiomas_revisar marcada 'nombre sospechoso' (posibles dos
+    apellidos pegados sin espacio en el PDF de origen), prueba a partir el primer token en dos en
+    cada posición posible y comprueba si el nombre resultante, normalizado, coincide con el
+    nombre_norm de alguna persona YA EXISTENTE en la base (igual que hace cargar_en_bd con los
+    nombres normales). Si una fila tiene EXACTAMENTE una partición que coincide con una persona
+    real, es casi seguro que esa es la partición correcta (una coincidencia por azar entre un
+    trozo de letras cualquiera y un nombre real completo es muy improbable). Si no coincide
+    ninguna partición, o coinciden varias (no se puede saber cuál es la correcta), la fila no se
+    toca. No escribe nada en la base; solo informa."""
+    crudo = psql("""
+select id, fuente_url, nombre, nivel from idiomas_revisar
+where motivo like 'nombre sospechoso%'
+order by id;
+""", tuples=True)
+    filas = [l.split('\t') for l in crudo.strip('\n').split('\n') if l]
+    if not filas:
+        return []
+    normas_existentes = set(l for l in psql("select nombre_norm from personas;", tuples=True).strip('\n').split('\n') if l)
+    resultado = []
+    for id_, fuente_url, nombre, nivel in filas:
+        primera, _, resto = nombre.partition(' ')
+        coincidencias = set()
+        for i in range(2, len(primera) - 1):
+            izq, der = primera[:i], primera[i:]
+            candidato = norm(f'{izq} {der} {resto}')
+            if candidato in normas_existentes:
+                coincidencias.add(candidato)
+        resultado.append((id_, fuente_url, nombre, nivel, sorted(coincidencias)))
+    return resultado
+
+
 def limpiar_homonimos_duplicados():
     """Resuelve solos los homónimos de 'idiomas_revisar' que en realidad no eran ambiguos: mismo
     nombre, mismo nivel repetido varias veces en el mismo PDF (una fila leída más de una vez, no dos
@@ -590,11 +622,31 @@ def main():
     ap.add_argument('--limpiar-duplicados', action='store_true',
                      help='Resuelve solo los homónimos de idiomas_revisar que no eran ambiguos de verdad '
                           '(mismo nombre, mismo nivel repetido en el mismo PDF): los carga y los borra de la cola')
+    ap.add_argument('--sospechosos-candidatos', action='store_true',
+                     help='SOLO LECTURA: para los «nombre sospechoso» de idiomas_revisar, prueba a separar '
+                          'el apellido pegado y muestra con qué persona ya existente coincidiría cada uno '
+                          '(sin tocar la base de datos)')
     a = ap.parse_args()
 
     if a.limpiar_duplicados:
         n = limpiar_homonimos_duplicados()
         print(f'{n} (nombre, PDF) resueltos automáticamente (mismo nivel repetido, sin ambigüedad real) y cargados.')
+        return
+
+    if a.sospechosos_candidatos:
+        filas = candidatos_resolucion_sospechosos()
+        sin_coincidencia = unicas = varias = 0
+        for id_, fuente_url, nombre, nivel, coincidencias in filas:
+            if len(coincidencias) == 1:
+                unicas += 1
+                print(f'[{id_}] «{nombre}» ({nivel}) -> ÚNICA coincidencia: «{coincidencias[0]}»')
+            elif len(coincidencias) > 1:
+                varias += 1
+                print(f'[{id_}] «{nombre}» ({nivel}) -> {len(coincidencias)} coincidencias posibles (ambiguo): {coincidencias}')
+            else:
+                sin_coincidencia += 1
+        print(f'\nTotal: {len(filas)} filas sospechosas · {unicas} con una única coincidencia (resolubles) · '
+              f'{varias} con varias coincidencias (ambiguo) · {sin_coincidencia} sin ninguna coincidencia')
         return
 
     if a.estado or a.detalle:
