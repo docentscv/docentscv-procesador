@@ -40,6 +40,19 @@ with tempfile.TemporaryDirectory() as d:
             print('  LINEA   :', repr(l))
             print('  DESPUES :', repr(lines[i + 1]) if i + 1 < len(lines) else None)
 
+    print('\n--- Contexto amplio alrededor de la línea problemática (530-545) ---')
+    for i in range(528, 546):
+        if 0 <= i < len(lines):
+            print(f'[{i}]', repr(lines[i]))
+
+    print('\n--- Unas filas normales de muestra para comparar formato (primeras 8 que cumplen FILA) ---')
+    c = 0
+    for i, l in enumerate(lines):
+        if pd.FILA.match(l):
+            print(f'[{i}]', repr(l))
+            c += 1
+            if c >= 8: break
+
     print('\n--- Intento normal de leer_dificil() para comparar con el recuento real ---')
     try:
         fecha, regs = pd.leer_dificil(ruta)
