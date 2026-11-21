@@ -9,6 +9,11 @@ PROV = {'ALICANTE': 'Alicante', 'ALACANT': 'Alicante', 'CASTELLON': 'Castelló',
         'VALENCIA': 'València', 'VALÈNCIA': 'València'}
 FILA = re.compile(r'^(.+?) - (\d{8}) - (.+?)\s{2,}(\d{6})\s+(\d{1,2}(?:,\d{1,3})?)\s+(NO|SI)\s+(Vacante|Sust\. Det\.|Sust\. Ind\.)(.*)$')
 FILA_LAX = re.compile(r'\d{6}\s+\d{1,2}(?:,\d{1,3})?\s+(?:NO|SI)\s+(?:Vacante|Sust)')
+# A veces pdftotext coloca el código y nombre del centro en la línea SIGUIENTE (p. ej. cuando el
+# nombre del centro queda desplazado verticalmente): la fila sale sin esa parte («LOCALIDAD -    plaza
+# horas SI/NO tipo») y la línea de después trae solo «CENTRO_COD - CENTRO».
+FILA_SIN_CENTRO = re.compile(r'^(.+?) -\s+(\d{6})\s+(\d{1,2}(?:,\d{1,3})?)\s+(NO|SI)\s+(Vacante|Sust\. Det\.|Sust\. Ind\.)(.*)$')
+CENTRO_SUELTO = re.compile(r'^(\d{8}) - (.+)$')
 RE_LING = re.compile(r'^(?:ING|FRA|VAL|CAS|ALE|ITA|CAT)[-A-Z0-9.]*$')
 CAB = re.compile(r'(Avgda\.Campanar|LLOCS DE DIF|PUESTOS DE DIF|^\s*PROCEDIMIENTO|LOCALITAT/LOCALIDAD|P[àa]g \d+ of \d+|CUERPO/COS:|ESPECIALIDAD/ESPECIALITAT:|PROV[ÍI]NCIA/PROVINCIA:)')
 
@@ -29,10 +34,11 @@ def leer_dificil(ruta):
     if not m: raise ErrorPDF('No encuentro la fecha del PDF junto al título.')
     fecha = f'{m.group(3)}-{m.group(2)}-{m.group(1)}'
     ctx = {'esp': '', 'esp_nom': '', 'prov': ''}
-    regs, pend_obs, ultima, huecos = [], [], None, 0
+    regs, pend_obs, ultima, huecos, pend_fila = [], [], None, 0, None
     for l in txt.splitlines():
         if not l.strip(): continue
         if CAB.search(l):
+            if pend_fila is not None: raise ErrorPDF('Fila sin código/nombre de centro antes de: ' + l.strip()[:100])
             me = re.search(r'ESPECIALITAT:\s*(\S+)\s+(.+)$', l)
             if me: ctx['esp'], ctx['esp_nom'] = me.group(1).strip(), me.group(2).strip()
             mp = re.search(r'PROV[ÍI]NCIA/PROVINCIA:\s*(.+)$', l)
@@ -53,12 +59,38 @@ def leer_dificil(ruta):
                  'tipo': 'vacante' if tipo == 'Vacante' else 'sustitucion',
                  'detalle': '' if tipo == 'Vacante' else ('determinada' if 'Det' in tipo else 'indeterminada'), '_col': mf.start(4)}
             regs.append(r); ultima = r; continue
+        # El código/nombre del centro a veces queda desplazado a la línea siguiente (ver FILA_SIN_CENTRO
+        # arriba): aquí falta esa parte, se guarda en espera de la línea con «CENTRO_COD - CENTRO».
+        if pend_fila is None:
+            mfc = FILA_SIN_CENTRO.match(l)
+            if mfc:
+                if not ctx['esp'] or not ctx['prov']: raise ErrorPDF('Fila sin especialidad o provincia: ' + l.strip()[:100])
+                loc, plaza, horas, iti, tipo, resto = mfc.groups()
+                pend_fila = {'loc': loc.strip(), 'plaza': plaza, 'horas': horas, 'iti': iti, 'tipo': tipo, 'resto': resto, '_col': mfc.start(2)}
+                continue
+        else:
+            mcs = CENTRO_SUELTO.match(l.strip())
+            if mcs:
+                cen_cod, cen = mcs.groups()
+                plaza, horas, iti, tipo, resto = pend_fila['plaza'], pend_fila['horas'], pend_fila['iti'], pend_fila['tipo'], pend_fila['resto']
+                cols = [c.strip() for c in re.split(r'\s{2,}', resto.strip()) if c.strip()]
+                ling = ''
+                if cols and RE_LING.match(cols[0]): ling = cols.pop(0)
+                obs = ' '.join(pend_obs + cols); pend_obs = []
+                r = {'especialidad_codigo': ctx['esp'], 'especialidad': ctx['esp_nom'], 'provincia': ctx['prov'], 'localidad': pend_fila['loc'],
+                     'centro_codigo': cen_cod, 'centro': cen.strip(), 'codigo_plaza': plaza, 'horas': float(horas.replace(',', '.')),
+                     'iti': iti == 'SI', 'req_ling': ling, 'observ': re.sub(r'\s+', ' ', obs).strip(),
+                     'tipo': 'vacante' if tipo == 'Vacante' else 'sustitucion',
+                     'detalle': '' if tipo == 'Vacante' else ('determinada' if 'Det' in tipo else 'indeterminada'), '_col': pend_fila['_col']}
+                regs.append(r); ultima = r; pend_fila = None; continue
+            raise ErrorPDF('Esperaba el código/nombre del centro tras la fila de ' + pend_fila['loc'] + ' y no lo encuentro: ' + l.strip()[:100])
         s = sangria(l)
         if ultima is not None and s < ultima['_col'] - 5:      # sigue el nombre del centro en la línea siguiente
             ultima['centro'] = (ultima['centro'] + ' ' + l.strip()).strip(); continue
         if s >= 60:                                            # observación centrada verticalmente: pertenece a la fila siguiente
             pend_obs.append(l.strip()); continue
         huecos += 1
+    if pend_fila is not None: raise ErrorPDF('Queda una fila sin código/nombre de centro: ' + pend_fila['loc'])
     if pend_obs: raise ErrorPDF('Queda una observación sin fila: ' + ' '.join(pend_obs)[:100])
     esperadas = sum(1 for l in txt.splitlines() if FILA_LAX.search(l))
     if not regs: raise ErrorPDF('No he encontrado ninguna plaza en el PDF.')
