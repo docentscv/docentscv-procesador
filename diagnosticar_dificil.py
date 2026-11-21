@@ -1,61 +1,36 @@
 #!/usr/bin/env python3
-"""DIAGNÓSTICO PUNTUAL (temporal): localiza la línea exacta del PDF de 'difícil cobertura' que
-FILA_LAX cuenta como fila pero que FILA no consigue capturar, para encontrar el caso no cubierto
-por el aparcador de 'nombre de centro que sigue en la línea siguiente'.
-Uso: python3 diagnosticar_dificil.py [nombre_original]   (por defecto 261120_pue_prov.pdf)
-Se borra en cuanto se arregla el bug real; no forma parte del procesador normal."""
-import os, sys, tempfile
+"""DIAGNÓSTICO PUNTUAL (temporal): reintenta una fila de 'importaciones' que quedó en estado
+'error' (la vuelve a poner 'pendiente', borrando el mensaje de error) y la procesa ya mismo con
+el procesador normal. Pensado para el PDF de difícil cobertura que falló por el bug ya corregido
+de parse_dificil.py (261120_pue_prov.pdf, «Faltan filas: leídas 115 de 116»).
+Uso: python3 diagnosticar_dificil.py [nombre_original] [tipo]"""
+import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import procesar_pdfs as pp
-import parse_dificil as pd
 
 nombre = sys.argv[1] if len(sys.argv) > 1 else '261120_pue_prov.pdf'
-fila = pp.psql(
-    f"select archivo, estado, coalesce(mensaje,'') from importaciones where nombre_original = {pp.lit(nombre)} and tipo = 'dificil' order by id desc limit 1",
+tipo = sys.argv[2] if len(sys.argv) > 2 else 'dificil'
+
+antes = pp.psql(
+    f"select id, estado, coalesce(mensaje,'') from importaciones where nombre_original = {pp.lit(nombre)} and tipo = {pp.lit(tipo)} order by id desc limit 1",
     tuples=True,
 ).strip()
-print('IMPORTACIONES ->', repr(fila))
-if not fila:
-    print('No encuentro ninguna fila en importaciones con ese nombre_original.'); sys.exit(1)
-archivo, estado, mensaje = fila.split('\t')
-print('archivo:', archivo, '| estado:', estado, '| mensaje:', mensaje)
+print('ANTES ->', repr(antes))
+if not antes:
+    print('No encuentro ninguna fila en importaciones con ese nombre_original/tipo.'); sys.exit(1)
+iid = antes.split('\t')[0]
 
-with tempfile.TemporaryDirectory() as d:
-    ruta = os.path.join(d, 'f.pdf')
-    pp.descargar(archivo, ruta)
-    print('Descargado, tamaño:', os.path.getsize(ruta), 'bytes')
-    txt = pd.texto(ruta)
-    lines = txt.splitlines()
-    print('Total líneas de texto:', len(lines))
+pp.psql(f"update importaciones set estado = 'pendiente', mensaje = null where id = {int(iid)}")
+print(f'Fila id={iid} reseteada a pendiente. Lanzando el procesador normal...')
 
-    n_lax = sum(1 for l in lines if pd.FILA_LAX.search(l))
-    n_fila = sum(1 for l in lines if pd.FILA.match(l))
-    print(f'Líneas que cumplen FILA_LAX: {n_lax} | líneas que cumplen FILA (match completo): {n_fila}')
+pp.main()
 
-    print('\n--- Líneas que SOLO cumplen FILA_LAX (no FILA) ---')
-    for i, l in enumerate(lines):
-        if pd.FILA_LAX.search(l) and not pd.FILA.match(l):
-            print(f'\n[LINEA {i}] sangria={pd.sangria(l)}')
-            print('  ANTES   :', repr(lines[i - 1]) if i > 0 else None)
-            print('  LINEA   :', repr(l))
-            print('  DESPUES :', repr(lines[i + 1]) if i + 1 < len(lines) else None)
+despues = pp.psql(
+    f"select id, estado, coalesce(mensaje,'') from importaciones where id = {int(iid)}",
+    tuples=True,
+).strip()
+print('DESPUES ->', repr(despues))
 
-    print('\n--- Contexto amplio alrededor de la línea problemática (530-545) ---')
-    for i in range(528, 546):
-        if 0 <= i < len(lines):
-            print(f'[{i}]', repr(lines[i]))
-
-    print('\n--- Unas filas normales de muestra para comparar formato (primeras 8 que cumplen FILA) ---')
-    c = 0
-    for i, l in enumerate(lines):
-        if pd.FILA.match(l):
-            print(f'[{i}]', repr(l))
-            c += 1
-            if c >= 8: break
-
-    print('\n--- Intento normal de leer_dificil() para comparar con el recuento real ---')
-    try:
-        fecha, regs = pd.leer_dificil(ruta)
-        print('OK, fecha:', fecha, 'filas:', len(regs))
-    except pd.ErrorPDF as e:
-        print('ErrorPDF (el mismo que en producción, esperado):', e)
+chk = pp.psql("select fecha, count(*) from plazas_dificil group by fecha order by fecha desc limit 5", tuples=True)
+print('--- plazas_dificil, últimas fechas ---')
+print(chk)
