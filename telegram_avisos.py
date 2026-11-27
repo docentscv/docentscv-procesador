@@ -10,10 +10,12 @@ Cada vez que lo ejecuta el procesador (cada pocos minutos):
 
 Necesita los secretos DATABASE_URL y TELEGRAM_BOT_TOKEN. Si falta alguno, no hace nada y no falla.
 """
-import os, re, sys, json, datetime, subprocess, urllib.request, urllib.error, urllib.parse
+import os, re, sys, json, html, datetime, subprocess, urllib.request, urllib.error, urllib.parse
 from zoneinfo import ZoneInfo
 
 WEB = os.environ.get('WEB_URL', 'https://docentscv.github.io/')
+BOTON = os.environ.get('BOTON_URL', WEB + 'ir/')     # página que lleva a la app en Android y a la web en el resto
+E_ = html.escape
 TZ = ZoneInfo('Europe/Madrid')
 UUID = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
 MAX_ENVIOS = 400          # por ejecución (Telegram permite unos 30 mensajes por segundo; sobra)
@@ -39,44 +41,54 @@ def fmt(f): return '/'.join(reversed(str(f).split('-')))
 
 
 # ───────────── textos ─────────────
-BIENVENIDA = ("✅ ¡Listo! Ya recibirás en este chat tus avisos personales de DocentsCV.\n\n"
-              "Qué te enviaré:\n• Cuando salgan plazas ofertadas de tus especialidades.\n• Cada miércoles, cuántas personas tienes delante en tu lista.\n\n"
-              "Para decirte la plaza más próxima a tu casa usamos el domicilio que indicaste en Mi apartado de la web.\n\n"
-              "Guardamos tu identificador de chat de Telegram solo para enviarte estos avisos. "
-              "Para dejar de recibirlos: /parar. Para borrar tus datos de Telegram: desvincula desde Mi apartado en la web.")
-AYUDA = ("Comandos:\n/parar – dejar de recibir avisos\n/reanudar – volver a recibirlos\n\n"
+BIENVENIDA = ("✅ <b>¡Listo! Ya estás conectado.</b>\n\n"
+              "A partir de ahora te escribiré aquí, solo a ti:\n"
+              "🔔 cuando salgan plazas de tus especialidades\n"
+              "📊 cada miércoles, cuántas personas tienes delante\n\n"
+              "📍 Para decirte la plaza más próxima a tu casa uso el domicilio que indicaste en Mi apartado de la web.\n\n"
+              "<i>Guardamos solo tu identificador de chat para enviarte estos avisos. "
+              "Para dejar de recibirlos: /parar. Para borrar tus datos de Telegram: desvincula desde Mi apartado en la web.</i>")
+AYUDA = ("<b>Comandos</b>\n/parar – dejar de recibir avisos\n/reanudar – volver a recibirlos\n\n"
          f"Todo lo demás está en {WEB}")
+RAYA = "━━━━━━━━━━━━━━"
+
 
 def texto_ofertas(fecha, r):
     n = r['n']
-    t = [f"📢 Plazas ofertadas · adjudicación del {fmt(fecha)}", "",
-         f"Hay {n} plaza{'s' if n != 1 else ''} de tus especialidades."]
+    t = ["🔔 <b>¡NUEVAS PLAZAS DE TU ESPECIALIDAD!</b>", RAYA, f"📅 Adjudicación del <b>{fmt(fecha)}</b>", "",
+         f"🎯 <b>{n} plaza{'s' if n != 1 else ''}</b> para ti", ""]
     if r.get('cercana_centro'):
         k = r.get('cercana_km')
-        km = '' if k is None else (', en tu misma zona' if k < 3 else f', a unos {int(k)} km')
-        t.append(f"📍 La plaza más próxima a tu casa ({r['casa_localidad']}) es {r['cercana_centro']} ({r['cercana_localidad']}){km}.")
+        dist = '' if k is None else ('🚗 <b>en tu misma zona</b>' if k < 3 else f'🚗 a unos <b>{int(k)} km</b>')
+        t += [f"📍 <b>La más cercana a tu casa</b> ({E_(r['casa_localidad'])})", f"🏫 {E_(r['cercana_centro'])} ({E_(r['cercana_localidad'])})"]
+        if dist: t.append(dist)
+        t.append("")
     elif not r.get('tiene_casa'):
-        if r.get('ejemplo_centro'): t.append(f"Por ejemplo: {r['ejemplo_centro']} ({r['ejemplo_localidad']}).")
-        t.append("Indica tu localidad en Mi apartado y te diré cuál te queda más cerca.")
+        if r.get('ejemplo_centro'): t += [f"🏫 Por ejemplo: {E_(r['ejemplo_centro'])} ({E_(r['ejemplo_localidad'])})", ""]
+        t += ["🏠 <i>Indica tu localidad en Mi apartado y te diré cuál te queda más cerca.</i>", ""]
     if r.get('favoritos'):
-        t.append(f"⭐ Hay plaza en centros favoritos tuyos: {r['favoritos']}.")
-    t += ["", "⏰ Tienes hasta las 02:00 h (a.m.) del día de la adjudicación para presentar o modificar tu solicitud.", "", f"Verlas todas: {WEB}"]
+        t += ["⭐ <b>Hay plaza en tus centros favoritos:</b>", E_(r['favoritos']), ""]
+    t += ["⏰ <b>¡No se te pase!</b>", "Tienes hasta las <b>02:00 h (a.m.)</b> del día de la adjudicación para presentar o modificar tu solicitud."]
     return '\n'.join(t)
 
 def texto_delante(filas_u, fecha):
-    t = ["📊 Tu posición esta semana", ""]
+    t = ["📊 <b>TU POSICIÓN ESTA SEMANA</b>", RAYA, ""]
     for r in filas_u:
         d = r['delante']
-        t.append(f"• {r['lista']}: tienes {d} persona{'s' if d != 1 else ''} delante de ti (tu puesto: {r['posicion']}).")
-    t += ["", f"Según la última adjudicación continua ({fmt(fecha)}). No cuento a quien ya tiene plaza o está desactivado.", f"Detalle en {WEB}"]
+        t += [f"🎓 <b>{E_(r['lista'])}</b>", f"👥 <b>{d} persona{'s' if d != 1 else ''} delante de ti</b>", f"🔢 Tu puesto: <b>{r['posicion']}</b>", ""]
+    t += [f"<i>Según la última adjudicación continua ({fmt(fecha)}). No cuento a quien ya tiene plaza o está desactivado.</i>"]
     return '\n'.join(t)
 
 
 # ───────────── envío con control de errores ─────────────
-def enviar(chat_id, texto, enviar_fn=None):
+def enviar(chat_id, texto, enviar_fn=None, boton=False):
     """True si se envió. Si la persona ha bloqueado el bot (403), se desactiva y no se reintenta."""
     try:
-        (enviar_fn or (lambda c, t: tg('sendMessage', chat_id=c, text=t, disable_web_page_preview='true')))(chat_id, texto)
+        def real(c, t):
+            p = dict(chat_id=c, text=t, parse_mode='HTML', disable_web_page_preview='true')
+            if boton: p['reply_markup'] = json.dumps({'inline_keyboard': [[{'text': '👉 Ver en DocentsCV', 'url': BOTON}]]})
+            return tg('sendMessage', **p)
+        (enviar_fn or real)(chat_id, texto)
         return True
     except urllib.error.HTTPError as e:
         if e.code in (400, 403):
@@ -123,7 +135,7 @@ def avisar_ofertas(enviar_fn=None, hoy=None):
     if f < (hoy - datetime.timedelta(days=1)).isoformat(): print('telegram: ofertas antiguas, no se avisa'); return 0
     n = 0
     for r in filas(f"select * from telegram_pendientes_ofertas({lit(f)}::date)")[:MAX_ENVIOS]:
-        if enviar(r['chat_id'], texto_ofertas(f, r), enviar_fn):
+        if enviar(r['chat_id'], texto_ofertas(f, r), enviar_fn, boton=True):
             psql(f"insert into telegram_enviados(user_id, tipo, clave) values ({lit(r['user_id'])}, 'ofertas', {lit(f)}) on conflict do nothing"); n += 1
     print(f'telegram: {n} aviso(s) de plazas enviados'); return n
 
@@ -137,7 +149,7 @@ def avisar_delante(enviar_fn=None, ahora=None, forzar=False):
     for r in filas(f"select * from telegram_pendientes_delante({lit(clave)})"): por.setdefault(r['user_id'], []).append(r)
     n = 0
     for uid, fs in list(por.items())[:MAX_ENVIOS]:
-        if enviar(fs[0]['chat_id'], texto_delante(fs, fs[0]['fecha']), enviar_fn):
+        if enviar(fs[0]['chat_id'], texto_delante(fs, fs[0]['fecha']), enviar_fn, boton=True):
             psql(f"insert into telegram_enviados(user_id, tipo, clave) values ({lit(uid)}, 'delante', {lit(clave)}) on conflict do nothing"); n += 1
     if n: print(f'telegram: {n} aviso(s) de posición enviados')
     return n
